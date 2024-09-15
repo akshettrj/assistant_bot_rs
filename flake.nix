@@ -10,6 +10,7 @@
   outputs = { self, nixpkgs, flake-utils, fenix }: flake-utils.lib.eachDefaultSystem (system:
     let
       pkgs = import nixpkgs { inherit system; };
+      rustToolchain = fenix.packages."${system}".latest.toolchain;
     in with pkgs;
     {
 
@@ -18,9 +19,23 @@
 
         nativeBuildInputs = [
           clang
-          fenix.packages."${system}".stable.toolchain
+          rustToolchain
           taplo
+          openssl
+          pkg-config
+
+          diesel-cli
+          diesel-cli-ext
+          sqlite
+          sqlite.dev
         ];
+      };
+
+      packages.default = callPackage ./nix/pkgs/assistant_bot_rs.nix {
+        rustPlatform = makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
       };
 
     }
