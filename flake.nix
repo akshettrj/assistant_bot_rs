@@ -17,18 +17,17 @@
       devShells.default = mkShell {
         name = "assistant_bot_rs";
 
-        nativeBuildInputs = [
+        buildInputs = [
           clang
           rustToolchain
           taplo
+          sea-orm-cli
+          openssl.dev
           openssl
           pkg-config
-
-          diesel-cli
-          diesel-cli-ext
-          sqlite
-          sqlite.dev
         ];
+
+        PKG_CONFIG_PATH = "${openssl.dev}/lib/pkgconfig:${sqlite.dev}/lib/pkgconfig";
       };
 
       packages.default = callPackage ./nix/pkgs/assistant_bot_rs.nix {

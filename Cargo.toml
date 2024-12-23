@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-diesel = { version = "2.2.4", features = ["uuid", "sqlite", "time", "serde_json"] }
+sea-orm = { version = "1.0.1", features = ["runtime-tokio", "sqlx", "sqlx-postgres", "sqlx-sqlite"] }
 serde = { version = "1.0.210", features = ["derive"] }
-teloxide = "0.13.0"
+teloxide = { version = "0.13.0", features = ["cache-me", "macros"] }
 # teloxide = { git = "https://github.com/teloxide/teloxide", version = "0.13.0", features = ["cache-me", "macros"] }
 tokio = { version = "1.40.0", features = ["full"] }
