@@ -1,23 +1,20 @@
-use diesel::prelude::*;
+use sea_orm::{ConnectionTrait, Database, DbBackend, DbErr, Statement};
 
-use assistant_bot_rs::{models, schema};
+const DATABASE_URL: &str = "sqlite://assistantbot.sqlite.db";
+const DATABASE_NAME: &str = "assistantbot_db";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut connection =
-        diesel::SqliteConnection::establish("sqlite://assistant_bot_database.sqlite").unwrap();
+    let db = Database::connect(DATABASE_URL).await?;
 
-    let new_user_info = models::NewUserInfo {
-        id: 1234,
-        first_name: "akshettrj",
-        last_name: None,
-        username: None,
+    let db = &match db.get_database_backend() {
+        sea_orm::DatabaseBackend::Postgres => todo!(),
+        sea_orm::DatabaseBackend::Sqlite => {
+            println!("Hello here!!");
+            db
+        }
+        _ => todo!(),
     };
-
-    dbg!(diesel::insert_into(schema::users_info::table)
-        .values(&new_user_info)
-        .execute(&mut connection)
-        .unwrap());
 
     Ok(())
 }

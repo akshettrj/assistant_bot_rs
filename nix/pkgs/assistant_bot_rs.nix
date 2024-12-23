@@ -1,8 +1,13 @@
 {
+  lib,
   rustPlatform,
+  clang,
   openssl,
+  libgcc,
   pkg-config,
-  sqlite
+  sqlite,
+  autoPatchelfHook,
+  stdenv
 }:
 
 rustPlatform.buildRustPackage {
@@ -11,11 +16,25 @@ rustPlatform.buildRustPackage {
 
     src = ../../.;
 
-    cargoLock.lockFile = ../../Cargo.lock;
+    cargoLock = {
+      lockFile = ../../Cargo.lock;
+      # outputHashes = {
+      #   "teloxide-0.13.0" = "sha256-GHI3zs0Tvw5HtipIG/xS26RNXyYdAOdgqZ6CRajdnio=";
+      # };
+    };
 
     nativeBuildInputs = [
-      openssl.dev
+      clang
       pkg-config
-      sqlite
+      autoPatchelfHook
     ];
+
+    buildInputs = [
+      openssl
+    ];
+
+    preBuild = ''
+      # addAutoPatchelfSearchPath ${sqlite.dev}/lib
+      addAutoPatchelfSearchPath ${libgcc}/lib
+    '';
 }
