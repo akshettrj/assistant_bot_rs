@@ -19,17 +19,19 @@ Send `/id` to the bot to find the user and chat ids to put in the config, and
 ## Command line
 
 ```
-assistant_bot_rs [--config <PATH>] [run | check-config | migrate]
+assistant_bot_rs [--config <PATH>] [run | check-config | migrate | settings <action>]
 ```
 
-| Command        | What it does                                                            |
-| -------------- | ----------------------------------------------------------------------- |
-| `run`          | Default. Connects, applies migrations (unless disabled), starts polling. |
-| `check-config` | Validates the config file against the modules, then exits.              |
-| `migrate`      | Applies the pending migrations and exits.                               |
+| Command             | What it does                                                             |
+| ------------------- | ------------------------------------------------------------------------ |
+| `run`               | Default. Connects, applies migrations (unless disabled), starts polling. |
+| `check-config`      | Validates the config file against the modules, then exits.               |
+| `migrate`           | Applies the pending migrations and exits.                                |
+| `settings <action>` | Views or changes the runtime settings (see below), e.g. while the bot is down. |
 
 The config path defaults to `config.toml` and can also be set with
-`ASSISTANT_CONFIG`.
+`ASSISTANT_CONFIG`. Logs go to stderr, so command output on stdout can be
+piped.
 
 ## Configuration
 
@@ -66,16 +68,31 @@ immediately and persist across restarts:
 /config remove telegram.sudo_users_id 123456789
 /config set telegram.allowed_users.notes [111, 222]
 /config unset telegram.allowed_users       back to the config file's value
+/config reload                            re-read the config file and the database
 ```
 
-| Key                           | What it controls                                  |
-| ----------------------------- | ------------------------------------------------- |
-| `telegram.error_logs_chat_id` | Where handler errors are reported                 |
-| `telegram.sudo_users_id`      | Users who can use every module                    |
-| `telegram.allowed_users`      | Per-module user allow lists (`.<module>` entries) |
-| `telegram.allowed_chats`      | Per-module chat allow lists (`.<module>` entries) |
-| `modules.disabled`            | Modules that are turned off                       |
-| `logging.filter`              | The log filter                                    |
+The same operations are available from the command line, which works while the
+bot is down:
+
+```sh
+assistant_bot_rs settings list
+assistant_bot_rs settings set telegram.sudo_users_id [1, 2]
+assistant_bot_rs settings unset modules.disabled
+```
+
+A running bot picks up changes made from the command line (or edits to the
+config file) after `/config reload`, or on its next start.
+
+| Key                             | What it controls                                  |
+| ------------------------------- | ------------------------------------------------- |
+| `telegram.error_logs_chat_id`   | Where handler errors are reported                 |
+| `telegram.sudo_users_id`        | Users who can use every module                    |
+| `telegram.allowed_users`        | Per-module user allow lists (`.<module>` entries) |
+| `telegram.allowed_chats`        | Per-module chat allow lists (`.<module>` entries) |
+| `modules.disabled`              | Modules that are turned off                       |
+| `logging.filter`                | The log filter                                    |
+| `modules.general.start_message` | Custom `/start` greeting (`{name}` placeholder)   |
+| `modules.<id>.<key>`            | Whatever other modules declare (see `/config`)    |
 
 Values are JSON (`42`, `[1, 2]`, `"text"`, `{}`) or plain text. Every change is
 type-checked and validated like the config file before being stored. Invalid
@@ -113,7 +130,8 @@ settings change.
 src/
 ├── main.rs, cli.rs, app.rs   entrypoint, argument parsing, startup
 ├── config/                   typed config, TOML + env loading, validation
-├── settings/                 runtime overrides: keys, figment provider, store
+├── settings/                 runtime overrides: keys, module settings, store,
+│                             operations shared by /config and the CLI
 ├── telemetry.rs              tracing subscriber with a reloadable filter
 ├── context.rs                AppContext: state shared with every handler
 ├── access.rs                 who may use which module
@@ -142,11 +160,13 @@ never see a half-applied change.
 
 ## Adding a module
 
-1. Create `src/modules/<id>.rs`:
+1. Create `src/modules/<id>.rs`. This one has a setting, `[modules.ping]
+   reply`, that the owner can change at runtime:
 
    ```rust
    use std::sync::Arc;
 
+   use serde::{Deserialize, Serialize};
    use teloxide::{prelude::*, utils::command::BotCommands};
 
    use crate::{
@@ -154,12 +174,28 @@ never see a half-applied change.
        bot::AssistantBot,
        context::AppContext,
        modules::{HandlerResult, Module, ModuleInfo, UpdateHandler},
+       settings::{ModuleSettings, keys::RuntimeSetting},
    };
+
+   const ID: &str = "ping";
+
+   /// `[modules.ping]`: must deserialize from an empty section.
+   #[derive(Deserialize, Serialize)]
+   #[serde(default, deny_unknown_fields)]
+   struct PingSettings {
+       reply: String,
+   }
+
+   impl Default for PingSettings {
+       fn default() -> Self {
+           Self { reply: "pong".into() }
+       }
+   }
 
    #[derive(BotCommands, Clone)]
    #[command(rename_rule = "lowercase")]
    enum Command {
-       #[command(description = "reply with pong")]
+       #[command(description = "check that the bot is alive")]
        Ping,
    }
 
@@ -168,7 +204,7 @@ never see a half-applied change.
    impl Module for PingModule {
        fn info(&self) -> ModuleInfo {
            ModuleInfo {
-               id: "ping",
+               id: ID,
                name: "Ping",
                description: "Checks that the bot is alive",
                access: AccessPolicy::Restricted,
@@ -179,29 +215,42 @@ never see a half-applied change.
            Command::bot_commands()
        }
 
+       fn settings(&self) -> Option<ModuleSettings> {
+           const RUNTIME: &[RuntimeSetting] = &[RuntimeSetting::new("reply", "What /ping answers")];
+           Some(ModuleSettings::of::<PingSettings>(RUNTIME))
+       }
+
        fn handler(&self) -> UpdateHandler {
            Update::filter_message().filter_command::<Command>().endpoint(ping)
        }
    }
 
-   async fn ping(bot: AssistantBot, msg: Message, _ctx: Arc<AppContext>) -> HandlerResult {
-       bot.send_message(msg.chat.id, "pong").await?;
+   async fn ping(bot: AssistantBot, msg: Message, ctx: Arc<AppContext>) -> HandlerResult {
+       let settings = ctx.settings.current();
+       let reply = settings
+           .module_settings::<PingSettings>(ID)
+           .map_or("pong", |ping| &ping.reply);
+       bot.send_message(msg.chat.id, reply).await?;
        Ok(())
    }
    ```
 
 2. Register it in `modules::builtin()` (`src/modules/mod.rs`).
-3. If it needs settings:
-   - add a `ping` field to `ModulesConfig`;
-   - read it through `ctx.settings.current()` rather than caching it, so
-     runtime changes are picked up;
-   - to make it editable from Telegram, list its keys in
-     `settings::keys::RUNTIME_SETTINGS`.
+3. Settings, if any, are declared by `Module::settings`:
+   - a type for the `[modules.<id>]` section, validated whenever the
+     configuration loads or changes (a bad value is rejected before it takes
+     effect);
+   - the keys that can change at runtime, which then show up in `/config` and
+     `settings list` as `modules.<id>.<key>`.
+
+   Read them with `ctx.settings.current().module_settings::<T>(ID)` for each
+   update rather than caching them, so runtime changes are picked up.
 4. Grant access with `/config add telegram.allowed_users.ping <user id>`, or in
    the config file.
 
 At startup, the registry rejects duplicate module ids, commands declared by two
-modules, and module ids in the config that don't exist.
+modules, settings sections that match no module, runtime keys that are not
+fields of the settings type, and module ids in the config that don't exist.
 
 ## Database
 

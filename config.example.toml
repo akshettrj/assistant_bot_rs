@@ -46,3 +46,8 @@ format = "full"
 [modules]
 # Runtime. Ids of the modules that are turned off.
 disabled = []
+
+# Settings of the `general` module (/start, /help, /id).
+[modules.general]
+# Runtime. Custom /start greeting; {name} is replaced with the user's first name.
+# start_message = "Hi {name}!"
