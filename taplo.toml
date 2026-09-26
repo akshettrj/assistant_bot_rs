@@ -1,0 +1,5 @@
+# TOML formatting (`taplo fmt`), also checked by `nix flake check`.
+include = ["*.toml", "migration/*.toml"]
+
+[formatting]
+column_width = 100

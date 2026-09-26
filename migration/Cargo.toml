@@ -1,0 +1,16 @@
+[package]
+name = "migration"
+description = "Database migrations for assistant_bot_rs"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "migration"
+path = "src/lib.rs"
+
+[dependencies]
+sea-orm-migration = { workspace = true, features = ["cli"] }
+tokio = { workspace = true }

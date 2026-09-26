@@ -1,0 +1,9 @@
+# The toolchain used by rustup and by the Nix flake (via fenix).
+#
+# rustfmt is deliberately absent: `rustfmt.toml` uses unstable options, so the
+# dev shell provides a nightly rustfmt instead (`cargo +nightly fmt` without
+# Nix).
+[toolchain]
+channel = "1.98.1"
+components = ["cargo", "clippy", "rust-analyzer", "rust-src", "rustc", "rust-std"]
+profile = "minimal"
