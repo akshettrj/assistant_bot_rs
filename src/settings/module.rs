@@ -71,7 +71,9 @@ impl ParsedSettings {
 
 impl fmt::Debug for ParsedSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ParsedSettings").field(&self.json).finish()
+        // The values are left out: sections may hold secrets (e.g. device
+        // keys).
+        f.debug_struct("ParsedSettings").finish_non_exhaustive()
     }
 }
 
@@ -118,6 +120,12 @@ mod tests {
         let parsed = SETTINGS.parse(Some(&json!({ "limit": 3 }))).unwrap();
         assert_eq!(parsed.typed::<Example>().unwrap().limit, 3);
         assert!(parsed.typed::<String>().is_none(), "wrong type");
+    }
+
+    #[test]
+    fn debug_output_leaves_the_values_out() {
+        let parsed = SETTINGS.parse(Some(&json!({ "limit": 424242 }))).unwrap();
+        assert!(!format!("{parsed:?}").contains("424242"));
     }
 
     #[test]
