@@ -1,74 +1,21 @@
-//! `/config`: view and change the runtime settings from Telegram.
-//!
-//! Owner-only, since the settings decide who can use what, and always enabled,
-//! since it is the way to re-enable the other modules. The operations
-//! themselves live in [`crate::settings::command`], shared with the CLI.
+//! The text form of `/config`: `/config get|set|add|… <key> [value]`.
 
-use std::sync::Arc;
+use teloxide::utils::html::{bold, code_inline, escape, italic};
 
-use teloxide::{
-    prelude::*,
-    types::{ParseMode, ReplyParameters},
-    utils::{
-        command::BotCommands,
-        html::{bold, code_inline, escape, italic},
-    },
-};
-
-use crate::{
-    access::AccessPolicy,
-    bot::{AssistantBot, MAX_MESSAGE_CHARS, command_menu, truncate_chars},
-    context::AppContext,
-    modules::{HandlerResult, Module, ModuleInfo, UpdateHandler},
-    settings::{
-        SettingsError,
-        command::{self, Listing, Outcome, SettingsCommand, ValueEntry},
-    },
-};
-
-#[derive(BotCommands, Clone, Debug, PartialEq, Eq)]
-#[command(rename_rule = "lowercase")]
-enum Command {
-    #[command(description = "view or change the runtime settings (/config help)")]
-    Config(String),
-}
-
-pub struct SettingsModule;
-
-impl Module for SettingsModule {
-    fn info(&self) -> ModuleInfo {
-        ModuleInfo {
-            id: "settings",
-            name: "Settings",
-            description: "Runtime configuration of the assistant",
-            access: AccessPolicy::OwnerOnly,
-        }
-    }
-
-    fn commands(&self) -> Vec<teloxide::types::BotCommand> {
-        Command::bot_commands()
-    }
-
-    fn always_enabled(&self) -> bool {
-        true
-    }
-
-    fn handler(&self) -> UpdateHandler {
-        Update::filter_message()
-            .filter_command::<Command>()
-            .endpoint(handle)
-    }
-}
+use crate::settings::command::{self, Listing, Outcome, SettingsCommand, ValueEntry};
 
 /// A parsed `/config` invocation.
 #[derive(Debug, PartialEq, Eq)]
-enum Action {
+pub enum Action {
+    /// Open the settings panel.
+    Panel,
     Help,
     Run(SettingsCommand),
 }
 
-const USAGE: &str = "\
-/config [list] — show every runtime setting
+pub const USAGE: &str = "\
+/config — open the settings panel
+/config list — show every runtime setting
 /config get <key>
 /config set <key> <value>
 /config unset <key> — go back to the config file's value
@@ -79,44 +26,7 @@ const USAGE: &str = "\
 Values are JSON (42, [1, 2], \"text\", {}) or plain text.
 Map settings also take per-entry keys, e.g. telegram.allowed_users.<module>.";
 
-async fn handle(
-    bot: AssistantBot,
-    msg: Message,
-    command: Command,
-    ctx: Arc<AppContext>,
-) -> HandlerResult {
-    let Command::Config(args) = command;
-    let user = msg.from.as_ref().map(|user| user.id);
-
-    let (text, outcome) = match parse_action(&args) {
-        Ok(Action::Help) => (escape(USAGE), None),
-        Ok(Action::Run(command)) => {
-            match command::execute(&ctx.settings, &ctx.modules, command, user).await {
-                Ok(outcome) => (render(&outcome), Some(outcome)),
-                // Infrastructure failures go to the error reporter.
-                Err(SettingsError::Db(error)) => return Err(error.into()),
-                Err(error) => (format!("❌ {}", escape(&error.to_string())), None),
-            }
-        }
-        Err(problem) => (
-            format!("❌ {}\n\n{}", escape(&problem), escape(USAGE)),
-            None,
-        ),
-    };
-
-    bot.send_message(msg.chat.id, truncate_chars(text, MAX_MESSAGE_CHARS))
-        .parse_mode(ParseMode::Html)
-        .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
-        .await?;
-
-    // After replying, since it takes one request per privileged user/chat.
-    if let Some(change) = outcome.as_ref().and_then(Outcome::change) {
-        command_menu::sync(&bot, &ctx, Some(&change.previous)).await;
-    }
-    Ok(())
-}
-
-fn parse_action(args: &str) -> Result<Action, String> {
+pub fn parse_action(args: &str) -> Result<Action, String> {
     let (verb, rest) = split_word(args);
     let (key, value) = split_word(rest);
     let key = key.to_string();
@@ -147,7 +57,8 @@ fn parse_action(args: &str) -> Result<Action, String> {
     };
 
     match verb {
-        "" | "list" => require_nothing(SettingsCommand::List),
+        "" => Ok(Action::Panel),
+        "list" => require_nothing(SettingsCommand::List),
         "reload" => require_nothing(SettingsCommand::Reload),
         "help" => Ok(Action::Help),
         "get" => require_key(SettingsCommand::Get),
@@ -169,7 +80,7 @@ fn split_word(text: &str) -> (&str, &str) {
 }
 
 /// Renders an outcome as Telegram HTML.
-fn render(outcome: &Outcome) -> String {
+pub fn render(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Listing(listing) => render_listing(listing),
         Outcome::Value(entry) => render_entry(entry),
@@ -258,7 +169,7 @@ mod tests {
     fn parses_actions() {
         let run = Action::Run;
         let cases = [
-            ("", run(SettingsCommand::List)),
+            ("", Action::Panel),
             ("  list ", run(SettingsCommand::List)),
             ("reload", run(SettingsCommand::Reload)),
             ("help", Action::Help),

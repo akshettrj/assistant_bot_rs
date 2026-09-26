@@ -95,10 +95,13 @@ pub trait Module: Send + Sync + 'static {
 }
 
 /// Every module shipped with the assistant, in routing order.
+///
+/// Settings come first, so that the answers to its prompts (plain messages)
+/// are not taken by another module.
 pub fn builtin() -> Vec<Arc<dyn Module>> {
     vec![
+        Arc::new(settings::SettingsModule::new()),
         Arc::new(general::GeneralModule),
         Arc::new(lights::LightsModule::new()),
-        Arc::new(settings::SettingsModule),
     ]
 }

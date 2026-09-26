@@ -58,10 +58,32 @@ over `logging.filter` at startup.
 ### Runtime settings
 
 The owner can change some settings from Telegram. The changes apply
-immediately and persist across restarts:
+immediately and persist across restarts.
+
+**The settings panel.** Send `/config` for a panel of buttons: the core
+settings with their current values, and a button per module. Each setting
+gets an editor that fits it:
+
+| Setting                         | Editor                                                     |
+| ------------------------------- | ---------------------------------------------------------- |
+| Modules                         | ✅/⬜ toggles to turn modules on and off                     |
+| Logging, the default light      | pick-one buttons (✏️ Other… for a custom log filter)        |
+| Sudo users                      | ❌ to remove someone, ➕ Add with Telegram's user picker     |
+| Error reports chat              | Telegram's group and channel pickers, or a typed chat id   |
+| Allowed users, allowed chats    | ➕ a module, then its users or chats as above               |
+| Timezone, start message         | ✏️ Change, then send the text (🗑 Clear to unset)            |
+| Presets, scenes, schedules      | an entry each, as JSON (➕ Add: `<name> <json>`)            |
+
+A typed value answers the prompt the panel posts: send it as a message, or
+`/cancel`. The prompt and your answer are then deleted and the panel updates.
+✏️ marks the settings changed from Telegram, and **↩️ Use the config file's
+value** removes the change. Users can also be added by id or by `@username`,
+if they have talked to the bot.
+
+**Text commands**, for scripts and quick changes:
 
 ```
-/config                                   list the settings, their values and sources
+/config list                              list the settings, their values and sources
 /config get logging.filter
 /config set logging.filter info,assistant_bot_rs=debug
 /config add telegram.sudo_users_id 123456789
@@ -104,8 +126,8 @@ Some settings stay file/env only:
   before the database is reachable.
 
 If a stored value becomes invalid (e.g. it names a module that was removed), it
-is skipped with a warning at startup, and `/config` lists it so it can be
-unset.
+is skipped with a warning at startup, and `/config list` shows it so it can
+be unset.
 
 ### Access control
 
@@ -265,7 +287,7 @@ src/
 ├── modules/                  Module trait, registry, built-in modules
 │   ├── general.rs            /start, /help, /id
 │   ├── lights/               /light: Tuya bulbs over the LAN, schedules
-│   └── settings.rs           /config
+│   └── settings/             /config: the settings panel and text commands
 └── db/                       connection, entities, repositories
 migration/                    SeaORM migrations (workspace member)
 nix/build.nix                 crane build and checks
@@ -367,7 +389,9 @@ never see a half-applied change.
      configuration loads or changes (a bad value is rejected before it takes
      effect);
    - the keys that can change at runtime, which then show up in `/config` and
-     `settings list` as `modules.<id>.<key>`.
+     `settings list` as `modules.<id>.<key>`. Give them a
+     `.kind(...)` (`Kind::Text`, `Kind::OneOf`, `Kind::Users`, ...) so that the
+     settings panel offers a fitting editor; the default is JSON.
 
    Read them with `ctx.settings.current().module_settings::<T>(ID)` for each
    update rather than caching them, so runtime changes are picked up.

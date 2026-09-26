@@ -14,6 +14,7 @@
 
 pub mod command;
 pub mod keys;
+pub mod kind;
 mod module;
 mod provider;
 
@@ -49,6 +50,9 @@ pub enum SettingsError {
 
     #[error("`{0}` is not a list")]
     NotAList(String),
+
+    #[error("`{0}` is not an entry of a map setting")]
+    NotAnEntry(String),
 
     #[error("the configuration without runtime overrides is invalid")]
     InvalidBase(#[source] ConfigError),
@@ -247,12 +251,52 @@ impl SettingsStore {
         by: Option<UserId>,
         registry: &ModuleRegistry,
     ) -> Result<Change, SettingsError> {
+        self.extend(key, vec![item], by, registry).await
+    }
+
+    /// Appends the `items` that are not there yet to the list at `key`, in a
+    /// single change.
+    pub async fn extend(
+        &self,
+        key: &str,
+        new_items: Vec<Value>,
+        by: Option<UserId>,
+        registry: &ModuleRegistry,
+    ) -> Result<Change, SettingsError> {
         self.modify(key, by, registry, |current| {
             let mut items = as_list(key, current)?;
-            if !items.contains(&item) {
-                items.push(item);
+            for item in new_items {
+                if !items.contains(&item) {
+                    items.push(item);
+                }
             }
             Ok(Value::Array(items))
+        })
+        .await
+    }
+
+    /// Removes the entry `<map>.<name>` from its map-valued setting, wherever
+    /// it is defined: this overrides the whole map.
+    pub async fn delete_entry(
+        &self,
+        entry_key: &str,
+        by: Option<UserId>,
+        registry: &ModuleRegistry,
+    ) -> Result<Change, SettingsError> {
+        let setting = self.catalog.resolve(entry_key)?;
+        let Some(name) = setting.entry_of(entry_key) else {
+            return Err(SettingsError::NotAnEntry(entry_key.to_string()));
+        };
+        let map_key = setting.key.clone();
+
+        self.modify(&map_key, by, registry, |current| {
+            let mut entries = match current {
+                None | Some(Value::Null) => Default::default(),
+                Some(Value::Object(entries)) => entries,
+                Some(_) => return Err(SettingsError::NotAnEntry(entry_key.to_string())),
+            };
+            entries.remove(name);
+            Ok(Value::Object(entries))
         })
         .await
     }
@@ -742,6 +786,74 @@ mod tests {
             store.current().source("telegram.allowed_chats"),
             Source::Database
         );
+    }
+
+    #[tokio::test]
+    async fn extend_adds_the_missing_items_at_once() {
+        let registry = registry();
+        let store = store_with(memory_db().await, &registry).await;
+
+        store
+            .add("telegram.sudo_users_id", json!(2), None, &registry)
+            .await
+            .unwrap();
+        store
+            .extend(
+                "telegram.sudo_users_id",
+                vec![json!(2), json!(3), json!(4)],
+                None,
+                &registry,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.current().value("telegram.sudo_users_id"),
+            Some(json!([2, 3, 4]))
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_entry_removes_entries_from_anywhere() {
+        let registry = registry();
+        let base = figment_from_toml(&format!(
+            "{BASE_CONFIG}allowed_chats = {{ general = [-5], lights = [-6] }}\n"
+        ));
+        let store = SettingsStore::load(base, memory_db().await, &registry, None)
+            .await
+            .unwrap();
+        store
+            .set("telegram.allowed_chats.notes", json!([-7]), None, &registry)
+            .await
+            .unwrap_err();
+        store
+            .set(
+                "telegram.allowed_chats.lights",
+                json!([-8]),
+                None,
+                &registry,
+            )
+            .await
+            .unwrap();
+
+        // From the file, and from a per-entry override.
+        for name in ["general", "lights"] {
+            store
+                .delete_entry(&format!("telegram.allowed_chats.{name}"), None, &registry)
+                .await
+                .unwrap();
+        }
+        assert!(store.current().config.telegram.allowed_chats.is_empty());
+        assert_eq!(
+            store.current().overrides().keys().collect::<Vec<_>>(),
+            ["telegram.allowed_chats"]
+        );
+
+        assert!(matches!(
+            store
+                .delete_entry("telegram.allowed_chats", None, &registry)
+                .await,
+            Err(SettingsError::NotAnEntry(_))
+        ));
     }
 
     #[tokio::test]

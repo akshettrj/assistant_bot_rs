@@ -9,7 +9,13 @@ use super::{
     scenes::{self, SceneSpec},
     schedule::Schedule,
 };
-use crate::{config::Secret, settings::keys::RuntimeSetting};
+use crate::{
+    config::Secret,
+    settings::{
+        keys::RuntimeSetting,
+        kind::{Choices, Kind},
+    },
+};
 
 /// Telegram limits callback data to 64 bytes, which hold the light and the
 /// preset names.
@@ -21,18 +27,27 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
     RuntimeSetting::new(
         "default",
         "The light used when a command names none (optional with a single light)",
-    ),
+    )
+    .titled("Default light")
+    .kind(Kind::OneOf {
+        choices: Choices::KeysOf("modules.lights.devices"),
+        custom: false,
+        optional: true,
+    }),
     RuntimeSetting::per_entry(
         "presets",
         "Named presets, e.g. {\"brightness\": 80, \"temperature\": \"warm\"}",
+        &Kind::Json,
     ),
     RuntimeSetting::per_entry(
         "scenes",
         "Custom scenes; easiest to add with /light scene add",
+        &Kind::Json,
     ),
     RuntimeSetting::per_entry(
         "schedules",
         "Named schedules; easiest to add with /light schedule add",
+        &Kind::Json,
     ),
 ];
 
