@@ -34,6 +34,22 @@
     {
       packages.default = build.package;
 
+      # One-off: fetch the local keys of Tuya devices (e.g. smart bulbs)
+      # through a Smart Life QR login. See scripts/tuya_local_key.py.
+      apps.tuya-local-key = {
+        type = "app";
+        program = pkgs.lib.getExe (pkgs.writeShellApplication {
+          name = "tuya-local-key";
+          runtimeInputs = [
+            (pkgs.python3.withPackages (python: [
+              python.qrcode
+              python.tuya-device-sharing-sdk
+            ]))
+          ];
+          text = ''exec python3 ${./scripts/tuya_local_key.py} "$@"'';
+        });
+      };
+
       # `nix flake check`: build, clippy, tests and formatting.
       checks = build.checks;
 

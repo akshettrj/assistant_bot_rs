@@ -21,3 +21,6 @@ debug/
 *.sqlite-*
 *.sqlite.db
 *.db
+
+# Output of `nix run .#tuya-local-key` (contains device local keys)
+/tuya-devices.json
