@@ -11,6 +11,7 @@ use teloxide::{
 
 use crate::{
     access::AccessPolicy,
+    bot::AssistantBot,
     config::AssistantConfig,
     context::AppContext,
     modules::{Module, ModuleInfo, UpdateHandler},
@@ -92,6 +93,17 @@ impl RegisteredModule {
             settings: module.settings(),
             module,
         }
+    }
+}
+
+impl RegisteredModule {
+    /// See [`Module::background`].
+    pub(crate) fn background(
+        &self,
+        bot: AssistantBot,
+        ctx: Arc<AppContext>,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        self.module.background(bot, ctx)
     }
 }
 

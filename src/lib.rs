@@ -17,6 +17,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod modules;
+pub mod scheduling;
 pub mod settings;
 pub mod telemetry;
 

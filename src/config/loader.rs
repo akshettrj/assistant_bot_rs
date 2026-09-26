@@ -86,6 +86,10 @@ impl AssistantConfig {
             )));
         }
 
+        if let Some(timezone) = &self.timezone {
+            super::top_level::validate_timezone(timezone).map_err(ConfigError::Invalid)?;
+        }
+
         if let Err(error) = EnvFilter::try_new(&self.logging.filter) {
             return Err(ConfigError::Invalid(format!(
                 "`logging.filter` is not a valid filter: {error}"
@@ -242,6 +246,18 @@ disabled = ["general"]
         Jail::expect_with(|jail| {
             let toml = format!("{MINIMAL}\n[database]\nmin_connections = 5\nmax_connections = 1\n");
             let err = load(jail, &toml).unwrap_err();
+            assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn timezones_are_validated() {
+        Jail::expect_with(|jail| {
+            let config = load(jail, &format!("timezone = \"Asia/Kolkata\"\n{MINIMAL}")).unwrap();
+            assert_eq!(config.timezone(), chrono_tz::Asia::Kolkata);
+
+            let err = load(jail, &format!("timezone = \"Mars/Olympus\"\n{MINIMAL}")).unwrap_err();
             assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
             Ok(())
         });

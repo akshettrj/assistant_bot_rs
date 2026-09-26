@@ -12,6 +12,7 @@ use teloxide::{
     adaptors::{Throttle, throttle::Limits},
     prelude::*,
 };
+use tokio::task::JoinSet;
 
 pub use self::error_reporter::{ErrorReporter, MAX_MESSAGE_CHARS, truncate_chars};
 use crate::{config::TelegramConfig, context::AppContext};
@@ -42,6 +43,15 @@ pub async fn run(ctx: Arc<AppContext>) -> anyhow::Result<()> {
 
     let error_reporter = ErrorReporter::new(bot.clone(), Arc::clone(&ctx));
 
+    // Dropping the set at the end of `run` cancels the tasks.
+    let mut background = JoinSet::new();
+    for module in ctx.modules.iter() {
+        if let Some(task) = module.background(bot.clone(), Arc::clone(&ctx)) {
+            tracing::debug!(module = module.info.id, "starting background work");
+            background.spawn(task);
+        }
+    }
+
     Dispatcher::builder(bot, handler::schema(&ctx.modules))
         .dependencies(dptree::deps![ctx])
         .default_handler(|update| async move {
@@ -53,6 +63,7 @@ pub async fn run(ctx: Arc<AppContext>) -> anyhow::Result<()> {
         .dispatch()
         .await;
 
+    background.shutdown().await;
     tracing::info!("shut down");
     Ok(())
 }

@@ -22,10 +22,13 @@ pub mod settings;
 
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use teloxide::types::BotCommand;
 
 pub use self::registry::*;
-use crate::{access::AccessPolicy, settings::ModuleSettings};
+use crate::{
+    access::AccessPolicy, bot::AssistantBot, context::AppContext, settings::ModuleSettings,
+};
 
 /// The result of every update handler.
 pub type HandlerResult = anyhow::Result<()>;
@@ -64,6 +67,19 @@ pub trait Module: Send + Sync + 'static {
 
     /// The module's settings section, `[modules.<id>]`, if it has one.
     fn settings(&self) -> Option<ModuleSettings> {
+        None
+    }
+
+    /// Long-running work (e.g. timers, device watchers), started once the bot
+    /// is connected and cancelled at shutdown.
+    ///
+    /// It runs even while the module is disabled, so it should check
+    /// `ctx.settings.current().is_enabled(..)` before acting.
+    fn background(
+        &self,
+        _bot: AssistantBot,
+        _ctx: Arc<AppContext>,
+    ) -> Option<BoxFuture<'static, ()>> {
         None
     }
 

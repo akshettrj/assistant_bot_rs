@@ -41,6 +41,10 @@ impl RuntimeSetting {
 
 pub const CORE_SETTINGS: &[RuntimeSetting] = &[
     RuntimeSetting::new(
+        "timezone",
+        "IANA timezone for schedules, e.g. Asia/Kolkata (default: the system's)",
+    ),
+    RuntimeSetting::new(
         "telegram.error_logs_chat_id",
         "Chat where handler errors are reported",
     ),
