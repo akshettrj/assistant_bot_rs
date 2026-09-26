@@ -15,5 +15,9 @@ debug/
 /.direnv/
 
 # Assistant Bot Stuff
-/config.yaml
+/config.toml
+# SQLite databases and their WAL/journal files
 *.sqlite
+*.sqlite-*
+*.sqlite.db
+*.db
