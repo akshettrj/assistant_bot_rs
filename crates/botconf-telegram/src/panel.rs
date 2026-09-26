@@ -1,7 +1,6 @@
 //! The screens of the settings panel: the home screen, one per module, and
 //! one per setting, with an editor fitting its [`Kind`].
 
-use sea_orm::DbErr;
 use serde_json::{Map, Value};
 use teloxide::{
     types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, UserId},
@@ -12,16 +11,11 @@ use super::{
     callback::{Ask, Button, Page, Target},
     edit::Edit,
 };
-use crate::{
-    bot::AssistantBot,
-    context::AppContext,
-    directory::Name,
-    settings::{
-        Snapshot, SnapshotExt, Source,
-        keys::{CatalogEntry, is_below},
-        kind::{Choice, Field, Kind},
-    },
+use botconf::{
+    Catalog, CatalogEntry, Choice, Field, Kind, Schema, Snapshot, Source, keys::is_below,
 };
+
+use crate::{Name, PanelBot, SettingsPanel, truncate};
 
 /// Longer values are cut short on the buttons.
 const MAX_LABEL_CHARS: usize = 32;
@@ -48,8 +42,8 @@ pub struct Setting<'a> {
 }
 
 impl<'a> Setting<'a> {
-    pub fn resolve(ctx: &'a AppContext, target: &'a Target) -> Option<Self> {
-        let setting = ctx.settings.catalog().entries().get(target.setting)?;
+    pub fn resolve(catalog: &'a Catalog, target: &'a Target) -> Option<Self> {
+        let setting = catalog.entries().get(target.setting)?;
         let (entry, kind) = match (&target.entry, setting.kind) {
             (None, kind) => (None, kind),
             (Some(name), Kind::Map { value, .. }) => (Some(name.as_str()), *value),
@@ -91,7 +85,7 @@ impl<'a> Setting<'a> {
     }
 
     /// The current value, if set.
-    pub fn value(&self, snapshot: &Snapshot) -> Option<Value> {
+    pub fn value<S: Schema>(&self, snapshot: &Snapshot<S>) -> Option<Value> {
         let value = snapshot.value(&self.key())?;
         let value = match self.field {
             Some(field) => value.get(field.key)?.clone(),
@@ -102,7 +96,7 @@ impl<'a> Setting<'a> {
 
     /// The edit setting the value to `value` (clearing it for `None`). For a
     /// field, the form is rewritten, without the fields of its group.
-    pub fn set(&self, snapshot: &Snapshot, value: Option<Value>) -> Edit {
+    pub fn set<S: Schema>(&self, snapshot: &Snapshot<S>, value: Option<Value>) -> Edit {
         let key = self.key();
         let Some(field) = self.field else {
             return Edit::Set(key, value.unwrap_or(Value::Null));
@@ -133,9 +127,9 @@ impl<'a> Setting<'a> {
     }
 
     /// The edit adding `items` to the list (and removing `removed`).
-    pub fn change_list(
+    pub fn change_list<S: Schema>(
         &self,
-        snapshot: &Snapshot,
+        snapshot: &Snapshot<S>,
         added: Vec<Value>,
         removed: Option<Value>,
     ) -> Edit {
@@ -169,33 +163,31 @@ impl<'a> Setting<'a> {
     }
 }
 
-pub async fn render(
-    ctx: &AppContext,
-    bot: Option<&AssistantBot>,
+/// Renders `page`; `bot` (when given) lets the names be looked up with
+/// Telegram.
+pub async fn render<S: Schema, R: PanelBot>(
+    panel: &SettingsPanel<S, R>,
+    bot: Option<&R>,
     page: &Page,
     notice: Option<&str>,
-) -> Result<Screen, DbErr> {
-    let snapshot = ctx.settings.current();
+) -> Screen {
+    let snapshot = panel.store.current();
     let mut screen = match page {
-        Page::Home => home(ctx, &snapshot),
-        Page::Module(id) => module(ctx, &snapshot, id),
-        Page::Setting(target) => match Setting::resolve(ctx, target) {
-            Some(setting) => self::setting(ctx, bot, &snapshot, target, setting).await?,
-            None => home(ctx, &snapshot),
+        Page::Home => home(panel, &snapshot),
+        Page::Section(id) => section(panel, &snapshot, id),
+        Page::Setting(target) => match Setting::resolve(panel.store.catalog(), target) {
+            Some(setting) => self::setting(panel, bot, &snapshot, target, setting).await,
+            None => home(panel, &snapshot),
         },
     };
     if let Some(notice) = notice {
         screen.text = format!("{}\n\n{}", escape(notice), screen.text);
     }
-    Ok(screen)
+    screen
 }
 
-/// A button showing `page` in a new message: for other modules' panels.
-pub fn post_button(label: &str, page: Page) -> Option<InlineKeyboardButton> {
-    button(label, Button::Post(page))
-}
-
-fn home(ctx: &AppContext, snapshot: &Snapshot) -> Screen {
+fn home<S: Schema, R: PanelBot>(panel: &SettingsPanel<S, R>, snapshot: &Snapshot<S>) -> Screen {
+    let button = |label: &str, action| button(&panel.prefix, label, action);
     let text = format!(
         "⚙️ {}\n{}",
         bold("Settings"),
@@ -205,26 +197,21 @@ fn home(ctx: &AppContext, snapshot: &Snapshot) -> Screen {
         )
     );
 
-    let mut rows = setting_rows(ctx, snapshot, None);
-    let modules: Vec<_> = ctx
-        .modules
+    let mut rows = setting_rows(panel, snapshot, None);
+    let sections: Vec<_> = panel
+        .store
+        .sections()
         .iter()
-        .filter(|module| {
-            module
-                .settings
-                .is_some_and(|settings| !settings.runtime.is_empty())
-        })
-        .filter_map(|module| {
-            let off = if snapshot.is_enabled(module.info.id) {
-                ""
-            } else {
-                " (off)"
-            };
-            let label = format!("{}{off} ›", module.info.name);
-            button(&label, Button::Open(Page::Module(module.info.id.into())))
+        .filter(|section| !section.settings.runtime.is_empty())
+        .filter_map(|section| {
+            let note = section_note(panel, snapshot, section.id)
+                .map(|note| format!(" ({note})"))
+                .unwrap_or_default();
+            let label = format!("{}{note} ›", section.title);
+            button(&label, Button::Open(Page::Section(section.id.into())))
         })
         .collect();
-    rows.extend(modules.chunks(2).map(<[_]>::to_vec));
+    rows.extend(sections.chunks(2).map(<[_]>::to_vec));
 
     rows.push(
         [
@@ -241,64 +228,83 @@ fn home(ctx: &AppContext, snapshot: &Snapshot) -> Screen {
     }
 }
 
-fn module(ctx: &AppContext, snapshot: &Snapshot, id: &str) -> Screen {
-    let Some(module) = ctx.modules.get(id) else {
-        return home(ctx, snapshot);
+fn section<S: Schema, R: PanelBot>(
+    panel: &SettingsPanel<S, R>,
+    snapshot: &Snapshot<S>,
+    id: &str,
+) -> Screen {
+    let Some(section) = panel
+        .store
+        .sections()
+        .iter()
+        .find(|section| section.id == id)
+    else {
+        return home(panel, snapshot);
     };
 
     let mut text = format!(
         "{}\n{}",
-        bold(module.info.name),
-        italic(&escape(module.info.description))
+        bold(&escape(section.title)),
+        italic(&escape(section.description))
     );
-    if !snapshot.is_enabled(id) {
-        text.push_str(&format!(
-            "\n\n{}",
-            escape("The module is turned off; turn it on from Settings › Modules.")
-        ));
+    if let Some(note) = section_note(panel, snapshot, id) {
+        text.push_str(&format!("\n\n{}", escape(&format!("Note: {note}."))));
     }
 
-    let mut rows = setting_rows(ctx, snapshot, Some(module.info.id));
-    rows.extend(button("‹ Back", Button::Open(Page::Home)).map(|button| vec![button]));
+    let mut rows = setting_rows(panel, snapshot, Some(section.id));
+    rows.extend(
+        button(&panel.prefix, "‹ Back", Button::Open(Page::Home)).map(|button| vec![button]),
+    );
     Screen {
         text,
         keyboard: InlineKeyboardMarkup::new(rows),
     }
 }
 
-/// A button per setting of `module` (the core ones for `None`).
-fn setting_rows(
-    ctx: &AppContext,
-    snapshot: &Snapshot,
-    module: Option<&str>,
+fn section_note<S: Schema, R>(
+    panel: &SettingsPanel<S, R>,
+    snapshot: &Snapshot<S>,
+    id: &str,
+) -> Option<String> {
+    panel.section_note.as_ref()?(snapshot, id)
+}
+
+/// A button per setting of `section` (the top-level ones for `None`).
+fn setting_rows<S: Schema, R: PanelBot>(
+    panel: &SettingsPanel<S, R>,
+    snapshot: &Snapshot<S>,
+    section: Option<&str>,
 ) -> Vec<Vec<InlineKeyboardButton>> {
-    ctx.settings
-        .catalog()
+    let catalog = panel.store.catalog();
+    catalog
         .entries()
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.section == module)
+        .filter(|(_, entry)| entry.section == section)
         .filter_map(|(position, entry)| {
             let target = Target::setting(position);
-            let setting = Setting::resolve(ctx, &target)?;
+            let setting = Setting::resolve(catalog, &target)?;
             let label = format!(
                 "{}: {}{}",
                 entry.title,
                 summary(snapshot, &setting),
                 changed_marker(snapshot, &entry.key)
             );
-            button(&label, Button::Open(Page::Setting(target))).map(|button| vec![button])
+            button(&panel.prefix, &label, Button::Open(Page::Setting(target)))
+                .map(|button| vec![button])
         })
         .collect()
 }
 
-async fn setting(
-    ctx: &AppContext,
-    bot: Option<&AssistantBot>,
-    snapshot: &Snapshot,
+async fn setting<S: Schema, R: PanelBot>(
+    panel: &SettingsPanel<S, R>,
+    bot: Option<&R>,
+    snapshot: &Snapshot<S>,
     target: &Target,
     setting: Setting<'_>,
-) -> Result<Screen, DbErr> {
+) -> Screen {
+    let button = |label: &str, action| button(&panel.prefix, label, action);
+    let catalog = panel.store.catalog();
     let key = setting.key();
     let value = setting.value(snapshot);
 
@@ -354,7 +360,7 @@ async fn setting(
             row(vec![change()]);
             match value.as_ref().and_then(Value::as_i64) {
                 Some(id) => {
-                    let name = chat_name(ctx, bot, ChatId(id)).await?;
+                    let name = chat_name(panel, bot, ChatId(id)).await;
                     format!("Now: {}", item_line(name.as_ref(), id))
                 }
                 None => escape("Not set."),
@@ -435,8 +441,8 @@ async fn setting(
             let mut lines = Vec::new();
             for item in list(value.as_ref()) {
                 let name = match (setting.kind, item.as_i64()) {
-                    (Kind::Users, Some(id)) => user_name(ctx, bot, id).await?,
-                    (_, Some(id)) => chat_name(ctx, bot, ChatId(id)).await?,
+                    (Kind::Users, Some(id)) => user_name(panel, bot, id).await,
+                    (_, Some(id)) => chat_name(panel, bot, ChatId(id)).await,
                     (_, None) => None,
                 };
                 let short = name
@@ -469,7 +475,7 @@ async fn setting(
             let mut lines = Vec::new();
             for (position, field) in form.fields.iter().enumerate() {
                 let field_target = target.field(position);
-                let Some(field_setting) = Setting::resolve(ctx, &field_target) else {
+                let Some(field_setting) = Setting::resolve(catalog, &field_target) else {
                     continue;
                 };
                 let summary = match field_setting.value(snapshot) {
@@ -493,7 +499,7 @@ async fn setting(
             let mut lines = Vec::new();
             for name in entries.keys() {
                 let entry_target = target.entry(name);
-                let Some(entry) = Setting::resolve(ctx, &entry_target) else {
+                let Some(entry) = Setting::resolve(catalog, &entry_target) else {
                     continue;
                 };
                 let summary = summary(snapshot, &entry);
@@ -557,15 +563,15 @@ async fn setting(
 
     let back = match (target.parent(), setting.setting.section) {
         (Some(parent), _) => Page::Setting(parent),
-        (None, Some(module)) => Page::Module(module.to_string()),
+        (None, Some(section)) => Page::Section(section.to_string()),
         (None, None) => Page::Home,
     };
     row(vec![button("‹ Back", Button::Open(back))]);
 
-    Ok(Screen {
+    Screen {
         text,
         keyboard: InlineKeyboardMarkup::new(rows),
-    })
+    }
 }
 
 /// The titles of the fields that setting this one clears, e.g. `Colour or
@@ -585,7 +591,7 @@ fn excluded_fields(setting: &Setting<'_>) -> Option<String> {
 }
 
 /// A short description of the value, for buttons.
-fn summary(snapshot: &Snapshot, setting: &Setting<'_>) -> String {
+fn summary<S: Schema>(snapshot: &Snapshot<S>, setting: &Setting<'_>) -> String {
     let Some(value) = setting.value(snapshot) else {
         return "not set".to_string();
     };
@@ -646,23 +652,22 @@ fn item_line(name: Option<&Name>, id: i64) -> String {
     }
 }
 
-async fn user_name(
-    ctx: &AppContext,
-    bot: Option<&AssistantBot>,
+async fn user_name<S: Schema, R: PanelBot>(
+    panel: &SettingsPanel<S, R>,
+    bot: Option<&R>,
     id: i64,
-) -> Result<Option<Name>, DbErr> {
-    let Ok(id) = u64::try_from(id) else {
-        return Ok(None);
-    };
-    ctx.directory.user(&ctx.db, bot, UserId(id)).await
+) -> Option<Name> {
+    let (names, bot, id) = (panel.names.as_ref()?, bot?, u64::try_from(id).ok()?);
+    names.user(bot, UserId(id)).await
 }
 
-async fn chat_name(
-    ctx: &AppContext,
-    bot: Option<&AssistantBot>,
+async fn chat_name<S: Schema, R: PanelBot>(
+    panel: &SettingsPanel<S, R>,
+    bot: Option<&R>,
     id: ChatId,
-) -> Result<Option<Name>, DbErr> {
-    ctx.directory.chat(&ctx.db, bot, id).await
+) -> Option<Name> {
+    let (names, bot) = (panel.names.as_ref()?, bot?);
+    names.chat(bot, id).await
 }
 
 /// `Now: <value>`.
@@ -698,7 +703,7 @@ fn list(value: Option<&Value>) -> Vec<Value> {
 
 /// Whether the key (or one of its entries) is stored in the database, so
 /// that it can be reset to the config file's value.
-fn is_overridden(snapshot: &Snapshot, key: &str) -> bool {
+fn is_overridden<S: Schema>(snapshot: &Snapshot<S>, key: &str) -> bool {
     snapshot
         .overrides()
         .keys()
@@ -706,7 +711,7 @@ fn is_overridden(snapshot: &Snapshot, key: &str) -> bool {
         .any(|stored| stored == key || is_below(stored, key))
 }
 
-fn changed_marker(snapshot: &Snapshot, key: &str) -> &'static str {
+fn changed_marker<S: Schema>(snapshot: &Snapshot<S>, key: &str) -> &'static str {
     if snapshot.source(key) == Source::Stored || is_overridden(snapshot, key) {
         " ✏️"
     } else {
@@ -715,20 +720,10 @@ fn changed_marker(snapshot: &Snapshot, key: &str) -> &'static str {
 }
 
 /// A button, unless its data does not fit.
-fn button(label: &str, action: Button) -> Option<InlineKeyboardButton> {
-    let data = action.encode()?;
+pub fn button(prefix: &str, label: &str, action: Button) -> Option<InlineKeyboardButton> {
+    let data = action.encode(prefix)?;
     Some(InlineKeyboardButton::callback(
         truncate(label, MAX_LABEL_CHARS + 16),
         data,
     ))
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        let mut cut: String = text.chars().take(max - 1).collect();
-        cut.push('…');
-        cut
-    }
 }

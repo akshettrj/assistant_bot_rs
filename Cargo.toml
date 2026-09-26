@@ -52,6 +52,7 @@ license.workspace = true
 
 [dependencies]
 botconf = { path = "crates/botconf", features = ["sea-orm"] }
+botconf-telegram = { path = "crates/botconf-telegram" }
 migration = { path = "migration" }
 
 anyhow = { workspace = true }

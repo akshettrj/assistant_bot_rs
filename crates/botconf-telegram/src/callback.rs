@@ -1,12 +1,12 @@
 //! The data of the settings panel's buttons:
-//! `cfg:<action>[:<target>[:<argument>]]`.
+//! `<prefix><action>[:<target>[:<argument>]]`, e.g. `cfg:o:h`.
 //!
 //! Settings are referred to by their position in the catalog, which never
 //! changes while the bot runs, since Telegram limits the data to 64 bytes.
 
-use crate::settings::keys::is_entry_name;
+use botconf::keys::is_entry_name;
 
-pub const PREFIX: &str = "cfg:";
+/// Telegram's limit, in bytes.
 const MAX_LEN: usize = 64;
 
 /// Separates the field of a form from the rest of a target.
@@ -102,8 +102,8 @@ impl Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
     Home,
-    /// The settings of a module.
-    Module(String),
+    /// The settings of a section, by id.
+    Section(String),
     Setting(Target),
 }
 
@@ -111,7 +111,7 @@ impl Page {
     fn encode(&self) -> Option<String> {
         match self {
             Self::Home => Some("h".into()),
-            Self::Module(id) => Some(format!("m:{id}")),
+            Self::Section(id) => Some(format!("m:{id}")),
             Self::Setting(target) => Some(format!("s:{}", target.encode()?)),
         }
     }
@@ -119,7 +119,7 @@ impl Page {
     fn parse(code: &str, argument: Option<&str>) -> Option<Self> {
         match (code, argument) {
             ("h", None) => Some(Self::Home),
-            ("m", Some(id)) => Some(Self::Module(id.to_string())),
+            ("m", Some(id)) => Some(Self::Section(id.to_string())),
             ("s", Some(target)) => Some(Self::Setting(Target::parse(target)?)),
             _ => None,
         }
@@ -163,7 +163,7 @@ pub enum Button {
 
 impl Button {
     /// The callback data, if it fits.
-    pub fn encode(&self) -> Option<String> {
+    pub fn encode(&self, prefix: &str) -> Option<String> {
         let target = |code: &str, target: &Target| Some(format!("{code}:{}", target.encode()?));
         let body = match self {
             Self::Open(page) => format!("o:{}", page.encode()?),
@@ -186,12 +186,12 @@ impl Button {
             Self::Close => "x".to_string(),
         };
 
-        let data = format!("{PREFIX}{body}");
+        let data = format!("{prefix}{body}");
         (data.len() <= MAX_LEN).then_some(data)
     }
 
-    pub fn parse(data: &str) -> Option<Self> {
-        let body = data.strip_prefix(PREFIX)?;
+    pub fn parse(prefix: &str, data: &str) -> Option<Self> {
+        let body = data.strip_prefix(prefix)?;
         let mut parts = body.splitn(3, ':');
         let action = parts.next()?;
         let second = parts.next();
@@ -228,6 +228,8 @@ impl Button {
 mod tests {
     use super::*;
 
+    const PREFIX: &str = "cfg:";
+
     #[test]
     fn buttons_round_trip() {
         let setting = Target::setting(3);
@@ -235,12 +237,12 @@ mod tests {
         let field = entry.field(2);
         for button in [
             Button::Open(Page::Home),
-            Button::Open(Page::Module("lights".into())),
+            Button::Open(Page::Section("lights".into())),
             Button::Open(Page::Setting(setting.clone())),
             Button::Open(Page::Setting(entry.clone())),
             Button::Open(Page::Setting(field.clone())),
             Button::Open(Page::Setting(setting.field(0))),
-            Button::Post(Page::Module("lights".into())),
+            Button::Post(Page::Section("lights".into())),
             Button::Post(Page::Home),
             Button::Toggle(setting.clone(), 2),
             Button::Pick(entry.clone(), 0),
@@ -257,9 +259,9 @@ mod tests {
             Button::Reload,
             Button::Close,
         ] {
-            let data = button.encode().unwrap();
+            let data = button.encode(PREFIX).unwrap();
             assert!(data.starts_with(PREFIX), "{data}");
-            assert_eq!(Button::parse(&data), Some(button), "{data}");
+            assert_eq!(Button::parse(PREFIX, &data), Some(button), "{data}");
         }
     }
 
@@ -278,11 +280,11 @@ mod tests {
     #[test]
     fn data_that_does_not_fit_is_refused() {
         let long = Target::setting(1).entry(&"x".repeat(60));
-        assert_eq!(Button::Delete(long).encode(), None);
+        assert_eq!(Button::Delete(long).encode(PREFIX), None);
 
         for entry in ["a:b", "a#b"] {
             let target = Target::setting(1).entry(entry);
-            assert_eq!(Button::Delete(target).encode(), None, "{entry}");
+            assert_eq!(Button::Delete(target).encode(PREFIX), None, "{entry}");
         }
     }
 
@@ -304,7 +306,7 @@ mod tests {
             "cfg:q:1",
             "light:x",
         ] {
-            assert_eq!(Button::parse(data), None, "{data}");
+            assert_eq!(Button::parse(PREFIX, data), None, "{data}");
         }
     }
 }

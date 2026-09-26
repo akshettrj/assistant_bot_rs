@@ -613,6 +613,30 @@ mod tests {
         assert!(bot.current().access().is_sudo(UserId(7)));
     }
 
+    #[tokio::test]
+    async fn modules_are_offered_by_the_module_settings() {
+        let store = store_with(memory_db().await).await;
+        let snapshot = store.current();
+        let catalog = store.catalog();
+        let choices = |key: &str| {
+            let setting = catalog.resolve(key).unwrap();
+            let values: Vec<_> = setting
+                .kind
+                .choices(snapshot.as_ref())
+                .into_iter()
+                .map(|choice| choice.value)
+                .collect();
+            values
+        };
+
+        // The settings module can't be turned off.
+        assert_eq!(choices("modules.disabled"), ["general", "lights"]);
+        assert_eq!(
+            choices("telegram.allowed_users"),
+            ["general", "lights", "settings"]
+        );
+    }
+
     #[test]
     fn values_are_json_or_strings() {
         assert_eq!(parse_value("42"), json!(42));

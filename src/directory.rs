@@ -8,10 +8,12 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
+use botconf_telegram::Names;
+use futures::future::BoxFuture;
 use sea_orm::{DatabaseConnection, DbErr};
 use teloxide::{
     prelude::*,
@@ -20,20 +22,14 @@ use teloxide::{
 
 use crate::{
     bot::AssistantBot,
+    context::AppContext,
     db::repositories::{chats, users},
 };
 
 /// How long an id Telegram didn't know is not asked about again.
 const MISS_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-/// The name of a user or chat.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Name {
-    /// E.g. `Ann Lee (@ann)`, `Family`.
-    pub full: String,
-    /// E.g. `Ann`, `Family`, for buttons.
-    pub short: String,
-}
+pub use botconf_telegram::Name;
 
 #[derive(Default)]
 pub struct Directory {
@@ -224,10 +220,81 @@ fn chat_name(title: Option<&str>, username: Option<&str>) -> Option<Name> {
     }
 }
 
+/// The directory, as the settings panel's source of names. Database errors
+/// are logged, and the ids shown instead.
+pub struct DirectoryNames {
+    ctx: Arc<AppContext>,
+}
+
+impl DirectoryNames {
+    pub fn new(ctx: Arc<AppContext>) -> Self {
+        Self { ctx }
+    }
+}
+
+fn logged<T: Default>(result: Result<T, DbErr>) -> T {
+    result.unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to look up a name");
+        T::default()
+    })
+}
+
+impl Names<AssistantBot> for DirectoryNames {
+    fn user<'a>(&'a self, bot: &'a AssistantBot, id: UserId) -> BoxFuture<'a, Option<Name>> {
+        let ctx = &self.ctx;
+        Box::pin(async move { logged(ctx.directory.user(&ctx.db, Some(bot), id).await) })
+    }
+
+    fn chat<'a>(&'a self, bot: &'a AssistantBot, id: ChatId) -> BoxFuture<'a, Option<Name>> {
+        let ctx = &self.ctx;
+        Box::pin(async move { logged(ctx.directory.chat(&ctx.db, Some(bot), id).await) })
+    }
+
+    fn user_by_username<'a>(&'a self, username: &'a str) -> BoxFuture<'a, Option<UserId>> {
+        Box::pin(async move {
+            let user = logged(users::find_by_username(&self.ctx.db, username).await)?;
+            u64::try_from(user.id).ok().map(UserId)
+        })
+    }
+
+    fn remember_users<'a>(&'a self, users: &'a [SharedUser]) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            for user in users {
+                logged(remember_shared_user(&self.ctx.db, user).await);
+            }
+        })
+    }
+
+    fn remember_chat<'a>(&'a self, chat: &'a ChatShared) -> BoxFuture<'a, ()> {
+        Box::pin(async move { logged(remember_shared_chat(&self.ctx.db, chat).await) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::test_support::memory_db;
+
+    #[tokio::test]
+    async fn the_directory_names_users_for_the_settings_panel() {
+        let ctx = crate::test_support::context(
+            crate::test_support::BASE_CONFIG,
+            crate::modules::builtin(),
+        )
+        .await;
+        let names = DirectoryNames::new(Arc::clone(&ctx));
+
+        let picked = SharedUser {
+            user_id: UserId(7),
+            first_name: Some("Ann".into()),
+            last_name: None,
+            username: Some("ann".into()),
+            photo: None,
+        };
+        names.remember_users(std::slice::from_ref(&picked)).await;
+        assert_eq!(names.user_by_username("@ann").await, Some(UserId(7)));
+        assert_eq!(names.user_by_username("@bob").await, None);
+    }
 
     #[tokio::test]
     async fn names_come_from_what_the_bot_has_seen() {

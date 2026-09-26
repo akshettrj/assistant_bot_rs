@@ -1,0 +1,21 @@
+[package]
+name = "botconf-telegram"
+description = "A Telegram settings panel (buttons, pickers, prompts) for botconf settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+botconf = { path = "../botconf" }
+futures = { workspace = true }
+serde_json = { workspace = true }
+teloxide = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+figment = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

@@ -14,7 +14,7 @@ pub struct AppContext {
     pub db: DatabaseConnection,
     pub modules: Arc<ModuleRegistry>,
     /// The questions waiting for an answer.
-    pub prompts: Prompts,
+    pub prompts: Arc<Prompts>,
     /// Names for user and chat ids.
     pub directory: Directory,
 }
@@ -29,7 +29,7 @@ impl AppContext {
             settings: Arc::new(settings),
             db,
             modules,
-            prompts: Prompts::default(),
+            prompts: Arc::default(),
             directory: Directory::default(),
         })
     }

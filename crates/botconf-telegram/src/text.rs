@@ -1,10 +1,14 @@
-//! The text form of `/config`: `/config get|set|add|… <key> [value]`.
+//! The text form of the settings command: `/config get|set|add|… <key>
+//! [value]`.|set|add|… <key> [value]`.
 
 use teloxide::utils::html::{bold, code_inline, escape, italic};
 
-use crate::settings::command::{self, Listing, Outcome, SettingsCommand, ValueEntry};
+use botconf::{
+    Schema,
+    command::{self, Listing, Outcome, SettingsCommand, ValueEntry},
+};
 
-/// A parsed `/config` invocation.
+/// A parsed invocation of the settings command.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
     /// Open the settings panel.
@@ -13,18 +17,22 @@ pub enum Action {
     Run(SettingsCommand),
 }
 
-pub const USAGE: &str = "\
-/config — open the settings panel
-/config list — show every runtime setting
-/config get <key>
-/config set <key> <value>
-/config unset <key> — go back to the config file's value
-/config add <key> <item> — append to a list
-/config remove <key> <item> — remove from a list
-/config reload — re-read the config file and the database
+/// The help of the settings command, `/<command>`.
+pub fn usage(command: &str) -> String {
+    format!(
+        "/{command} — open the settings panel
+/{command} list — show every runtime setting
+/{command} get <key>
+/{command} set <key> <value>
+/{command} unset <key> — go back to the config file's value
+/{command} add <key> <item> — append to a list
+/{command} remove <key> <item> — remove from a list
+/{command} reload — re-read the config file and the stored settings
 
-Values are JSON (42, [1, 2], \"text\", {}) or plain text.
-Map settings also take per-entry keys, e.g. telegram.allowed_users.<module>.";
+Values are JSON (42, [1, 2], \"text\", {{}}) or plain text.
+Map settings also take per-entry keys, e.g. <map>.<entry>."
+    )
+}
 
 pub fn parse_action(args: &str) -> Result<Action, String> {
     let (verb, rest) = split_word(args);
@@ -80,9 +88,9 @@ fn split_word(text: &str) -> (&str, &str) {
 }
 
 /// Renders an outcome as Telegram HTML.
-pub fn render(outcome: &Outcome) -> String {
+pub fn render<S: Schema>(outcome: &Outcome<S>, command: &str) -> String {
     match outcome {
-        Outcome::Listing(listing) => render_listing(listing),
+        Outcome::Listing(listing) => render_listing(listing, command),
         Outcome::Value(entry) => render_entry(entry),
         Outcome::Changed {
             key,
@@ -109,7 +117,7 @@ pub fn render(outcome: &Outcome) -> String {
     }
 }
 
-fn render_listing(listing: &Listing) -> String {
+fn render_listing(listing: &Listing, command: &str) -> String {
     let mut text = bold("Runtime settings");
     for entry in &listing.settings {
         text.push_str(&format!("\n\n{}", render_entry(entry)));
@@ -125,7 +133,7 @@ fn render_listing(listing: &Listing) -> String {
     if !listing.ignored.is_empty() {
         text.push_str(&format!(
             "\n\n{}",
-            bold("Ignored stored values (/config unset them)")
+            bold(&format!("Ignored stored values (/{command} unset them)"))
         ));
         for (key, reason) in &listing.ignored {
             text.push_str(&format!("\n{}: {}", code_inline(key), escape(reason)));
@@ -133,7 +141,7 @@ fn render_listing(listing: &Listing) -> String {
     }
 
     text.push_str("\n\n");
-    text.push_str(&escape("Send /config help for the syntax."));
+    text.push_str(&escape(&format!("Send /{command} help for the syntax.")));
     text
 }
 
@@ -159,10 +167,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        modules::builtin,
-        test_support::{BASE_CONFIG, context},
-    };
+    use crate::testing::panel;
 
     #[test]
     fn parses_actions() {
@@ -215,30 +220,29 @@ mod tests {
 
     #[tokio::test]
     async fn renders_changes_and_listings() {
-        let ctx = context(BASE_CONFIG, builtin()).await;
+        let (panel, _) = panel().await;
+        let store = panel.store();
 
         let outcome = command::execute(
-            &ctx.settings,
-            SettingsCommand::Set("telegram.sudo_users_id".into(), "[5]".into()),
+            store,
+            SettingsCommand::Set("admins".into(), "[5]".into()),
             Some(1),
         )
         .await
         .unwrap();
-        let text = render(&outcome);
+        let text = render(&outcome, "config");
         assert!(text.starts_with("✅"), "{text}");
         assert!(text.contains("[5]") && text.contains("(stored)"), "{text}");
 
-        ctx.settings
-            .set("telegram.allowed_users.general", json!([3]), None)
+        store.set("access.lamp", json!([3]), None).await.unwrap();
+        let outcome = command::execute(store, SettingsCommand::List, None)
             .await
             .unwrap();
-        let outcome = command::execute(&ctx.settings, SettingsCommand::List, None)
-            .await
-            .unwrap();
-        let text = render(&outcome);
-        assert!(text.contains("modules.general.start_message"), "{text}");
+        let text = render(&outcome, "config");
+        assert!(text.contains("features.lamp.presets"), "{text}");
         assert!(text.contains("Per-entry overrides"), "{text}");
-        assert!(text.contains("telegram.allowed_users.general"), "{text}");
+        assert!(text.contains("access.lamp"), "{text}");
+        assert!(text.contains("Send /config help"), "{text}");
         assert!(text.contains("(default)"), "{text}");
     }
 }

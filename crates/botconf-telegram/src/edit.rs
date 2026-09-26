@@ -1,13 +1,7 @@
 //! The changes the settings panel makes, and how they are applied.
 
-use botconf::Schema;
+use botconf::{Change, Schema, SettingsError, SettingsStore};
 use serde_json::Value;
-use teloxide::types::UserId;
-
-use crate::{
-    context::AppContext,
-    settings::{Change, SettingsError, actor},
-};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
@@ -23,22 +17,19 @@ pub enum Edit {
 }
 
 /// What an applied edit did.
-#[derive(Debug)]
-pub struct Applied {
+pub struct Applied<S: Schema> {
     /// A one-line summary for the user.
     pub notice: String,
     /// The change to react to, if anything changed.
-    pub change: Option<Change>,
+    pub change: Option<Change<S>>,
 }
 
-pub async fn apply(
-    ctx: &AppContext,
+/// Applies `edit`; `by` records who made it.
+pub async fn apply<S: Schema>(
+    store: &SettingsStore<S>,
     edit: Edit,
-    by: Option<UserId>,
-) -> Result<Applied, SettingsError> {
-    let store = &ctx.settings;
-    let by = actor(by);
-
+    by: Option<i64>,
+) -> Result<Applied<S>, SettingsError> {
     let change = match edit {
         Edit::Set(key, value) => store.set(&key, value, by).await?,
         Edit::Extend(key, items) => store.extend(&key, items, by).await?,

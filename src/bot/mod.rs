@@ -16,7 +16,7 @@ use teloxide::{
 use tokio::task::JoinSet;
 
 pub use self::error_reporter::{ErrorReporter, MAX_MESSAGE_CHARS, truncate_chars};
-use crate::{config::TelegramConfig, context::AppContext};
+use crate::{config::TelegramConfig, context::AppContext, modules};
 
 /// The client every handler receives.
 ///
@@ -53,9 +53,10 @@ pub async fn run(ctx: Arc<AppContext>) -> anyhow::Result<()> {
         }
     }
 
+    let panel = modules::settings::panel(&ctx);
     let unhandled_bot = bot.clone();
     Dispatcher::builder(bot, handler::schema(&ctx.modules))
-        .dependencies(dptree::deps![ctx])
+        .dependencies(dptree::deps![panel, ctx])
         .default_handler(move |update| {
             let bot = unhandled_bot.clone();
             async move {

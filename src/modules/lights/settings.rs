@@ -436,3 +436,72 @@ mod tests {
         assert!(!format!("{settings:?}").contains("s3cret"));
     }
 }
+
+#[cfg(test)]
+mod form_tests {
+    use serde_json::json;
+
+    use crate::{
+        modules::builtin,
+        test_support::{BASE_CONFIG, context},
+    };
+
+    #[tokio::test]
+    async fn presets_are_edited_with_a_form_offering_every_scene() {
+        let config =
+            format!("{BASE_CONFIG}\n[modules.lights.scenes.party]\nsteps = [\"red\", \"blue\"]\n");
+        let ctx = context(&config, builtin()).await;
+        let snapshot = ctx.settings.current();
+        let presets = ctx
+            .settings
+            .catalog()
+            .resolve("modules.lights.presets")
+            .unwrap();
+        let botconf::Kind::Map {
+            value: botconf::Kind::Form(form),
+            ..
+        } = presets.kind
+        else {
+            panic!("{:?}", presets.kind)
+        };
+
+        let scene = form
+            .fields
+            .iter()
+            .find(|field| field.key == "scene")
+            .unwrap();
+        let scenes: Vec<_> = scene
+            .kind
+            .choices(snapshot.as_ref())
+            .into_iter()
+            .map(|choice| choice.value)
+            .collect();
+        assert_eq!(scenes[0], "party", "custom scenes first");
+        assert!(scenes.contains(&"rainbow".to_string()), "{scenes:?}");
+
+        // The form's initial value is a valid preset, and the store checks
+        // the rest (e.g. a colour and a scene at once).
+        let initial = presets.kind;
+        let botconf::Kind::Map { value, .. } = initial else {
+            unreachable!()
+        };
+        ctx.settings
+            .set(
+                "modules.lights.presets.new",
+                value.empty_value().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            ctx.settings
+                .set(
+                    "modules.lights.presets.new",
+                    json!({ "color": "red", "scene": "party" }),
+                    None
+                )
+                .await
+                .is_err()
+        );
+    }
+}
