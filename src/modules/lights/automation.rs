@@ -16,7 +16,7 @@ use super::{
     schedule::{self, Schedule},
     settings::{DeviceConfig, LightsSettings},
 };
-use crate::{bot::AssistantBot, context::AppContext};
+use crate::{bot::AssistantBot, context::AppContext, settings::SnapshotExt};
 
 /// How often schedules are checked (and so how late they may run).
 const SCHEDULER_TICK: Duration = Duration::from_secs(15);

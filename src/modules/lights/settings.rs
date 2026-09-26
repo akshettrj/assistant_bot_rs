@@ -13,11 +13,11 @@ use super::{
 use crate::{
     config::Secret,
     settings::{
-        Snapshot,
         keys::RuntimeSetting,
         kind::{Choice, Choices, DynamicChoices, Field, FixedChoice, Form, Kind},
     },
 };
+use botconf::View;
 
 /// Telegram limits callback data to 64 bytes, which hold the light and the
 /// preset names.
@@ -108,7 +108,7 @@ const PRESET_FORM: Form = Form {
 /// A preset sets one of a white, a colour or a scene.
 const LOOK: &str = "look";
 
-fn color_choices(_: &Snapshot) -> Vec<Choice> {
+fn color_choices(_: &dyn View) -> Vec<Choice> {
     NAMED_COLORS
         .iter()
         .map(|(name, _)| {
@@ -121,9 +121,9 @@ fn color_choices(_: &Snapshot) -> Vec<Choice> {
         .collect()
 }
 
-fn scene_choices(snapshot: &Snapshot) -> Vec<Choice> {
-    let settings = snapshot
-        .module_settings::<LightsSettings>(super::ID)
+fn scene_choices(view: &dyn View) -> Vec<Choice> {
+    let settings = view
+        .section::<LightsSettings>(super::ID)
         .cloned()
         .unwrap_or_default();
     scenes::names(&settings)

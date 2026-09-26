@@ -6,5 +6,4 @@
 
 pub mod chats_info;
 pub mod prelude;
-pub mod settings;
 pub mod users_info;

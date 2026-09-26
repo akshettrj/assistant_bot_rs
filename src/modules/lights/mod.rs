@@ -58,7 +58,7 @@ use crate::{
     context::AppContext,
     modules::{HandlerResult, Module, ModuleInfo, UpdateHandler},
     prompts::{self, Answer},
-    settings::ModuleSettings,
+    settings::{ModuleSettings, SnapshotExt, actor},
 };
 
 pub const ID: &str = "lights";
@@ -336,17 +336,16 @@ impl Lights {
         };
 
         let store = &origin.ctx.settings;
-        let registry = &origin.ctx.modules;
         // The scene first: the preset refers to it.
         if let Some((scene, spec)) = &captured.scene {
             let key = format!("modules.{ID}.scenes.{scene}");
-            if let Err(error) = store.set(&key, spec.clone(), origin.user, registry).await {
+            if let Err(error) = store.set(&key, spec.clone(), actor(origin.user)).await {
                 return Reply::error(error.to_string());
             }
         }
         let key = format!("modules.{ID}.presets.{preset}");
         if let Err(error) = store
-            .set(&key, captured.preset.clone(), origin.user, registry)
+            .set(&key, captured.preset.clone(), actor(origin.user))
             .await
         {
             return Reply::error(error.to_string());
@@ -367,13 +366,12 @@ impl Lights {
 
     async fn manage_scene(&self, origin: &Origin<'_>, command: SceneCommand) -> Reply {
         let store = &origin.ctx.settings;
-        let registry = &origin.ctx.modules;
         let key = |name: &str| format!("modules.{ID}.scenes.{name}");
 
         match command {
             SceneCommand::Add { name, spec } => {
                 let value = serde_json::to_value(&spec).expect("scenes serialize");
-                match store.set(&key(&name), value, origin.user, registry).await {
+                match store.set(&key(&name), value, actor(origin.user)).await {
                     Ok(_) => Reply::message(format!(
                         "✅ Added the {name} scene: {}. Try /light {name}",
                         spec.describe()
@@ -381,7 +379,7 @@ impl Lights {
                     Err(error) => Reply::error(error.to_string()),
                 }
             }
-            SceneCommand::Remove(name) => match store.unset(&key(&name), registry).await {
+            SceneCommand::Remove(name) => match store.unset(&key(&name)).await {
                 Ok(Some(_)) => Reply::message(format!("✅ Removed the {name} scene")),
                 Ok(None) => Reply::error(format!(
                     "`{name}` is defined in the config file: remove it there"
@@ -398,27 +396,26 @@ impl Lights {
         command: ScheduleCommand,
     ) -> Reply {
         let store = &origin.ctx.settings;
-        let registry = &origin.ctx.modules;
         let key = |name: &str| format!("modules.{ID}.schedules.{name}");
 
         let (done, result) = match command {
             ScheduleCommand::Add { name, schedule } => {
                 let value = serde_json::to_value(&schedule).expect("schedules serialize");
-                let result = store.set(&key(&name), value, origin.user, registry).await;
+                let result = store.set(&key(&name), value, actor(origin.user)).await;
                 (format!("✅ Added {}", code_inline(&name)), result.map(drop))
             }
             ScheduleCommand::Enable { name, enabled } => {
                 let mut schedule = settings.schedules()[&name].clone();
                 schedule.enabled = enabled;
                 let value = serde_json::to_value(&schedule).expect("schedules serialize");
-                let result = store.set(&key(&name), value, origin.user, registry).await;
+                let result = store.set(&key(&name), value, actor(origin.user)).await;
                 let verb = if enabled { "Resumed" } else { "Paused" };
                 (
                     format!("✅ {verb} {}", code_inline(&name)),
                     result.map(drop),
                 )
             }
-            ScheduleCommand::Remove(name) => match store.unset(&key(&name), registry).await {
+            ScheduleCommand::Remove(name) => match store.unset(&key(&name)).await {
                 Ok(Some(_)) => (format!("✅ Removed {}", code_inline(&name)), Ok(())),
                 Ok(None) => {
                     return Reply::error(format!(

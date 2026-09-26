@@ -1,526 +1,232 @@
 //! Runtime settings: configuration overrides stored in the database and
 //! editable from Telegram (`/config`) or the CLI (`settings`).
 //!
-//! The effective configuration is built by layering, from the lowest to the
-//! highest priority:
-//! 1. the config file;
-//! 2. the `ASSISTANT_*` environment variables;
-//! 3. the overrides of the `settings` table, for the keys of the [`Catalog`]:
-//!    the core ones and the ones modules declare with [`ModuleSettings`].
-//!
-//! Every change goes through the same deserialization and validation as the
-//! config file, then atomically replaces the [`Snapshot`] that handlers read,
-//! so it applies immediately.
+//! The machinery is the [`botconf`] crate; this module describes the
+//! assistant's configuration to it ([`AssistantSchema`]): the core runtime
+//! keys, the modules' sections, the access rules derived from the
+//! configuration, and the checks against the module registry.
 
-pub mod command;
-pub mod keys;
-pub mod kind;
-mod module;
-mod provider;
+use std::sync::Arc;
 
-use std::{collections::BTreeMap, sync::Arc};
-
-use arc_swap::ArcSwap;
-use figment::{Figment, Source as FigmentSource};
-use sea_orm::{DatabaseConnection, DbErr, TransactionTrait};
-use serde_json::Value;
-use teloxide::types::UserId;
-use tokio::sync::Mutex;
-
-pub use self::module::{ModuleSettings, ParsedSettings};
-use self::{
-    keys::{Catalog, UnknownKey},
-    provider::Override,
+use botconf::{
+    Choice, Choices, DynamicChoices, FixedChoice, Kind, RuntimeSetting, Schema, Section, View,
+    storage::SeaOrmStorage,
 };
+pub use botconf::{SettingsError, Source, keys, kind, parse_value};
+use figment::Figment;
+use sea_orm::DatabaseConnection;
+use teloxide::types::UserId;
+
+/// A module's settings section, declared by
+/// [`Module::settings`](crate::modules::Module::settings).
+pub use botconf::SectionSettings as ModuleSettings;
+
 use crate::{
-    access::AccessControl,
-    config::{AssistantConfig, ConfigError},
-    db::repositories::settings as repo,
-    modules::{ModuleRegistry, ModuleSettingsMap},
+    access::AccessControl, config::AssistantConfig, modules::ModuleRegistry,
     telemetry::LogFilterHandle,
 };
 
-#[derive(Debug, thiserror::Error)]
-pub enum SettingsError {
-    #[error(transparent)]
-    UnknownKey(#[from] UnknownKey),
+pub type SettingsStore = botconf::SettingsStore<AssistantSchema>;
+pub type Snapshot = botconf::Snapshot<AssistantSchema>;
+pub type Change = botconf::Change<AssistantSchema>;
 
-    #[error("invalid value for `{key}`: {reason}")]
-    InvalidValue { key: String, reason: String },
+/// The operations shared by `/config` and the `settings` CLI command.
+pub mod command {
+    pub use botconf::command::{Listing, SettingsCommand, ValueEntry, execute, render_value};
 
-    #[error("`{0}` is not a list")]
-    NotAList(String),
-
-    #[error("`{0}` is not an entry of a map setting")]
-    NotAnEntry(String),
-
-    #[error("the configuration without runtime overrides is invalid")]
-    InvalidBase(#[source] ConfigError),
-
-    #[error("database error")]
-    Db(#[from] DbErr),
+    pub type Outcome = botconf::command::Outcome<super::AssistantSchema>;
 }
 
-/// Where the effective value of a key comes from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Source {
-    /// Not set anywhere: the built-in default.
-    Default,
-    File,
-    Environment,
-    Database,
-    Other(String),
+/// The assistant's configuration, as the settings store sees it.
+pub struct AssistantSchema {
+    modules: Arc<ModuleRegistry>,
+    /// Applies `logging.filter` changes; `None` outside the bot (e.g. the
+    /// CLI, whose changes are for the bot).
+    log_filter: Option<LogFilterHandle>,
 }
 
-impl std::fmt::Display for Source {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Default => f.write_str("default"),
-            Self::File => f.write_str("config file"),
-            Self::Environment => f.write_str("environment"),
-            Self::Database => f.write_str("database"),
-            Self::Other(name) => f.write_str(name),
+/// What the assistant derives from its configuration.
+#[derive(Debug)]
+pub struct Derived {
+    pub access: AccessControl,
+}
+
+impl Schema for AssistantSchema {
+    type Config = AssistantConfig;
+    type Derived = Derived;
+
+    fn derive(&self, config: &AssistantConfig) -> Result<Derived, String> {
+        config.validate().map_err(|error| error.to_string())?;
+        self.modules
+            .validate_config(config)
+            .map_err(|error| error.to_string())?;
+        Ok(Derived {
+            access: AccessControl::from_config(&config.telegram),
+        })
+    }
+
+    fn settings(&self) -> Vec<RuntimeSetting> {
+        CORE_SETTINGS.to_vec()
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        self.modules.sections()
+    }
+
+    fn lint(&self, snapshot: &Snapshot) -> Vec<String> {
+        self.modules.lint_config(&snapshot.config)
+    }
+
+    fn on_change(&self, previous: Option<&Snapshot>, current: &Snapshot) {
+        let Some(handle) = &self.log_filter else {
+            return;
+        };
+        let changed = match previous {
+            Some(previous) => previous.config.logging.filter != current.config.logging.filter,
+            // At startup, the filter was set from the file already, unless
+            // the environment pins it.
+            None => {
+                !handle.is_pinned_by_env() && current.overrides().contains_key("logging.filter")
+            }
+        };
+        if changed && let Err(error) = handle.set(&current.config.logging.filter) {
+            tracing::warn!(%error, "failed to apply the new log filter");
         }
     }
 }
 
-/// An immutable view of the effective configuration.
-#[derive(Debug)]
-pub struct Snapshot {
-    pub config: AssistantConfig,
-    pub access: AccessControl,
-    /// The parsed `[modules.<id>]` sections.
-    module_settings: ModuleSettingsMap,
-    /// The overrides in effect, by key.
-    overrides: BTreeMap<String, Value>,
-    /// Stored overrides that are not applied because they are invalid (e.g.
-    /// they refer to a module that no longer exists), with the reason.
-    ignored: BTreeMap<String, String>,
-    figment: Figment,
+impl AssistantSchema {
+    pub fn modules(&self) -> &ModuleRegistry {
+        &self.modules
+    }
 }
 
-impl Snapshot {
-    pub fn is_enabled(&self, module_id: &str) -> bool {
-        !self.config.modules.disabled.contains(module_id)
-    }
+/// Loads the settings: `base` (the config file and the environment), then
+/// the overrides stored in the database.
+pub async fn load(
+    base: Figment,
+    db: DatabaseConnection,
+    modules: Arc<ModuleRegistry>,
+    log_filter: Option<LogFilterHandle>,
+) -> Result<SettingsStore, SettingsError> {
+    let schema = AssistantSchema {
+        modules,
+        log_filter,
+    };
+    SettingsStore::load(schema, base, SeaOrmStorage::new(db)).await
+}
+
+/// The assistant's shortcuts on a snapshot.
+pub trait SnapshotExt {
+    fn is_enabled(&self, module_id: &str) -> bool;
+
+    fn access(&self) -> &AccessControl;
 
     /// The settings of a module, as the type it declared with
     /// [`ModuleSettings::of`]. `None` if the module declares no settings or
     /// `T` is not their type.
-    pub fn module_settings<T: 'static>(&self, module_id: &str) -> Option<&T> {
-        self.module_settings.get(module_id)?.typed()
+    fn module_settings<T: 'static>(&self, module_id: &str) -> Option<&T>;
+}
+
+impl SnapshotExt for Snapshot {
+    fn is_enabled(&self, module_id: &str) -> bool {
+        !self.config.modules.disabled.contains(module_id)
     }
 
-    pub fn overrides(&self) -> &BTreeMap<String, Value> {
-        &self.overrides
+    fn access(&self) -> &AccessControl {
+        &self.derived.access
     }
 
-    pub fn ignored(&self) -> &BTreeMap<String, String> {
-        &self.ignored
-    }
-
-    /// The effective value of a (dotted) key, defaults included.
-    pub fn value(&self, key: &str) -> Option<Value> {
-        // Module sections: from the parsed settings, which include defaults.
-        if let Some(rest) = key.strip_prefix("modules.") {
-            let (id, field) = rest.split_once('.').unwrap_or((rest, ""));
-            if let Some(parsed) = self.module_settings.get(id) {
-                return parsed.json().pointer(&to_pointer(field)).cloned();
-            }
-        }
-
-        let config = serde_json::to_value(&self.config).ok()?;
-        config.pointer(&to_pointer(key)).cloned()
-    }
-
-    /// Where the effective value of a key comes from.
-    pub fn source(&self, key: &str) -> Source {
-        let Some(metadata) = self.figment.find_metadata(key) else {
-            return Source::Default;
-        };
-
-        if metadata.name == provider::SOURCE_NAME {
-            Source::Database
-        } else if matches!(metadata.source, Some(FigmentSource::File(_))) {
-            Source::File
-        } else if metadata.name.contains("environment") {
-            Source::Environment
-        } else {
-            Source::Other(metadata.name.to_string())
-        }
+    fn module_settings<T: 'static>(&self, module_id: &str) -> Option<&T> {
+        self.section(module_id)
     }
 }
 
-/// `a.b` -> `/a/b`, `` -> `` (the whole document).
-fn to_pointer(key: &str) -> String {
-    if key.is_empty() {
-        String::new()
-    } else {
-        format!("/{}", key.replace('.', "/"))
-    }
+/// Who made a change, as stored.
+pub fn actor(user: Option<UserId>) -> Option<i64> {
+    user.and_then(|user| i64::try_from(user.0).ok())
 }
 
-/// The result of a successful change.
-#[derive(Debug)]
-pub struct Change {
-    pub previous: Arc<Snapshot>,
-    pub current: Arc<Snapshot>,
+const LOG_FILTERS: &[FixedChoice] = &[
+    FixedChoice::new("info", "info"),
+    FixedChoice::new("debug", "debug"),
+    FixedChoice::new("info,assistant_bot_rs=debug", "debug (the bot only)"),
+    FixedChoice::new("warn", "warn"),
+];
+
+/// The core keys that can change at runtime; modules declare theirs with
+/// [`ModuleSettings`]. Everything else (the bot token, the database, the
+/// owner, ...) is needed to start the bot, or is too sensitive to change
+/// remotely, so it can only be set in the config file or the environment.
+pub const CORE_SETTINGS: &[RuntimeSetting] = &[
+    RuntimeSetting::new("modules.disabled", "The modules that are turned off")
+        .titled("Modules")
+        .kind(Kind::SetOf {
+            choices: Choices::Dynamic(DynamicChoices(toggleable_modules)),
+            inverted: true,
+        }),
+    RuntimeSetting::new(
+        "timezone",
+        "IANA timezone for schedules, e.g. Asia/Kolkata (default: the system's)",
+    )
+    .kind(Kind::Text { optional: true }),
+    RuntimeSetting::new("telegram.sudo_users_id", "Users who can use every module")
+        .titled("Sudo users")
+        .kind(Kind::Users),
+    RuntimeSetting::per_entry(
+        "telegram.allowed_users",
+        "Users allowed to use a module, per module id",
+        &Kind::Users,
+    )
+    .entry_names(Choices::Dynamic(DynamicChoices(all_modules))),
+    RuntimeSetting::per_entry(
+        "telegram.allowed_chats",
+        "Chats whose members may use a module, per module id",
+        &Kind::Chats,
+    )
+    .entry_names(Choices::Dynamic(DynamicChoices(all_modules))),
+    RuntimeSetting::new(
+        "telegram.error_logs_chat_id",
+        "Chat where handler errors are reported",
+    )
+    .titled("Error reports chat")
+    .kind(Kind::Chat),
+    RuntimeSetting::new(
+        "logging.filter",
+        "Log filter directives, e.g. info,assistant_bot_rs=debug",
+    )
+    .titled("Logging")
+    .kind(Kind::OneOf {
+        choices: Choices::Fixed(LOG_FILTERS),
+        custom: true,
+        optional: false,
+    }),
+];
+
+fn module_choices(view: &dyn View, toggleable_only: bool) -> Vec<Choice> {
+    let Some(schema) = view.schema::<AssistantSchema>() else {
+        return Vec::new();
+    };
+    schema
+        .modules
+        .iter()
+        .filter(|module| !(toggleable_only && module.always_enabled))
+        .map(|module| Choice::new(module.info.id, module.info.name))
+        .collect()
 }
 
-/// Owns the effective configuration and every change to it.
-#[derive(Debug)]
-pub struct SettingsStore {
-    base: Figment,
-    db: DatabaseConnection,
-    catalog: Catalog,
-    current: ArcSwap<Snapshot>,
-    /// Serialises the read-modify-write cycles of the changes.
-    write_lock: Mutex<()>,
-    log_filter: Option<LogFilterHandle>,
+fn all_modules(view: &dyn View) -> Vec<Choice> {
+    module_choices(view, false)
 }
 
-impl SettingsStore {
-    /// Layers the stored overrides on top of `base` (file + environment).
-    ///
-    /// Stored overrides that are invalid are skipped with a warning rather
-    /// than failing the startup, which would make them impossible to fix from
-    /// Telegram.
-    pub async fn load(
-        base: Figment,
-        db: DatabaseConnection,
-        registry: &ModuleRegistry,
-        log_filter: Option<LogFilterHandle>,
-    ) -> Result<Self, SettingsError> {
-        let catalog = Catalog::new(registry);
-        let snapshot = load_snapshot(&base, &db, &catalog, registry).await?;
-
-        if let Some(handle) = &log_filter
-            && !handle.is_pinned_by_env()
-            && snapshot.overrides.contains_key("logging.filter")
-            && let Err(error) = handle.set(&snapshot.config.logging.filter)
-        {
-            tracing::warn!(%error, "failed to apply the stored log filter");
-        }
-
-        Ok(Self {
-            base,
-            db,
-            catalog,
-            current: ArcSwap::from_pointee(snapshot),
-            write_lock: Mutex::new(()),
-            log_filter,
-        })
-    }
-
-    /// The effective configuration. Cheap; hold on to it only for the
-    /// duration of one operation so that changes are picked up.
-    pub fn current(&self) -> Arc<Snapshot> {
-        self.current.load_full()
-    }
-
-    /// The keys that can be changed at runtime.
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
-    }
-
-    /// Rebuilds the configuration from the config file, the environment and
-    /// the database, e.g. after the CLI changed the stored settings. Settings
-    /// needed at startup (token, database, ...) still require a restart.
-    pub async fn reload(&self, registry: &ModuleRegistry) -> Result<Change, SettingsError> {
-        let _guard = self.write_lock.lock().await;
-        let snapshot = load_snapshot(&self.base, &self.db, &self.catalog, registry).await?;
-        Ok(self.publish(snapshot))
-    }
-
-    /// Overrides `key` with `value`, replacing the overrides of its entries.
-    pub async fn set(
-        &self,
-        key: &str,
-        value: Value,
-        by: Option<UserId>,
-        registry: &ModuleRegistry,
-    ) -> Result<Change, SettingsError> {
-        self.modify(key, by, registry, |_| Ok(value)).await
-    }
-
-    /// Appends `item` to the list at `key`, unless it is already there.
-    pub async fn add(
-        &self,
-        key: &str,
-        item: Value,
-        by: Option<UserId>,
-        registry: &ModuleRegistry,
-    ) -> Result<Change, SettingsError> {
-        self.extend(key, vec![item], by, registry).await
-    }
-
-    /// Appends the `items` that are not there yet to the list at `key`, in a
-    /// single change.
-    pub async fn extend(
-        &self,
-        key: &str,
-        new_items: Vec<Value>,
-        by: Option<UserId>,
-        registry: &ModuleRegistry,
-    ) -> Result<Change, SettingsError> {
-        self.modify(key, by, registry, |current| {
-            let mut items = as_list(key, current)?;
-            for item in new_items {
-                if !items.contains(&item) {
-                    items.push(item);
-                }
-            }
-            Ok(Value::Array(items))
-        })
-        .await
-    }
-
-    /// Removes the entry `<map>.<name>` from its map-valued setting, wherever
-    /// it is defined: this overrides the whole map.
-    pub async fn delete_entry(
-        &self,
-        entry_key: &str,
-        by: Option<UserId>,
-        registry: &ModuleRegistry,
-    ) -> Result<Change, SettingsError> {
-        let setting = self.catalog.resolve(entry_key)?;
-        let Some(name) = setting.entry_of(entry_key) else {
-            return Err(SettingsError::NotAnEntry(entry_key.to_string()));
-        };
-        let map_key = setting.key.clone();
-
-        self.modify(&map_key, by, registry, |current| {
-            let mut entries = match current {
-                None | Some(Value::Null) => Default::default(),
-                Some(Value::Object(entries)) => entries,
-                Some(_) => return Err(SettingsError::NotAnEntry(entry_key.to_string())),
-            };
-            entries.remove(name);
-            Ok(Value::Object(entries))
-        })
-        .await
-    }
-
-    /// Removes every occurrence of `item` from the list at `key`.
-    pub async fn remove(
-        &self,
-        key: &str,
-        item: Value,
-        by: Option<UserId>,
-        registry: &ModuleRegistry,
-    ) -> Result<Change, SettingsError> {
-        self.modify(key, by, registry, |current| {
-            let mut items = as_list(key, current)?;
-            items.retain(|existing| existing != &item);
-            Ok(Value::Array(items))
-        })
-        .await
-    }
-
-    /// Removes the overrides of `key` and of its entries, falling back to the
-    /// file/environment values. Returns `None` if nothing was overridden.
-    pub async fn unset(
-        &self,
-        key: &str,
-        registry: &ModuleRegistry,
-    ) -> Result<Option<Change>, SettingsError> {
-        let _guard = self.write_lock.lock().await;
-        let previous = self.current();
-
-        // Look at the table rather than at the snapshot, so that ignored
-        // overrides can be cleaned up too.
-        let stored: Vec<_> = repo::all(&self.db)
-            .await?
-            .into_iter()
-            .map(|row| row.key)
-            .filter(|stored| stored == key || keys::is_below(stored, key))
-            .collect();
-        if stored.is_empty() {
-            return Ok(None);
-        }
-
-        let mut overrides = previous.overrides.clone();
-        let mut ignored = previous.ignored.clone();
-        for key in &stored {
-            overrides.remove(key);
-            ignored.remove(key);
-        }
-
-        let snapshot = build(&self.base, overrides, ignored, registry).map_err(|error| {
-            SettingsError::InvalidValue {
-                key: key.to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-
-        repo::delete(&self.db, stored.iter().map(String::as_str)).await?;
-        tracing::info!(key, "runtime setting removed");
-        Ok(Some(self.publish(snapshot)))
-    }
-
-    async fn modify(
-        &self,
-        key: &str,
-        by: Option<UserId>,
-        registry: &ModuleRegistry,
-        new_value: impl FnOnce(Option<Value>) -> Result<Value, SettingsError>,
-    ) -> Result<Change, SettingsError> {
-        self.catalog.resolve(key)?;
-
-        let _guard = self.write_lock.lock().await;
-        let previous = self.current();
-        let value = new_value(previous.value(key))?;
-
-        // Setting a key replaces the overrides of its entries.
-        let replaced: Vec<_> = previous
-            .overrides
-            .keys()
-            .chain(previous.ignored.keys())
-            .filter(|existing| keys::is_below(existing, key))
-            .cloned()
-            .collect();
-
-        let mut overrides = previous.overrides.clone();
-        let mut ignored = previous.ignored.clone();
-        for existing in &replaced {
-            overrides.remove(existing);
-            ignored.remove(existing);
-        }
-        ignored.remove(key);
-        overrides.insert(key.to_string(), value.clone());
-
-        let snapshot = build(&self.base, overrides, ignored, registry).map_err(|error| {
-            SettingsError::InvalidValue {
-                key: key.to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-
-        let txn = self.db.begin().await?;
-        repo::delete(&txn, replaced.iter().map(String::as_str)).await?;
-        repo::upsert(&txn, key, &value.to_string(), by).await?;
-        txn.commit().await?;
-
-        tracing::info!(key, %value, ?by, "runtime setting changed");
-        Ok(self.publish(snapshot))
-    }
-
-    fn publish(&self, snapshot: Snapshot) -> Change {
-        let current = Arc::new(snapshot);
-        let previous = self.current.swap(Arc::clone(&current));
-
-        if previous.config.logging.filter != current.config.logging.filter
-            && let Some(handle) = &self.log_filter
-            && let Err(error) = handle.set(&current.config.logging.filter)
-        {
-            tracing::warn!(%error, "failed to apply the new log filter");
-        }
-
-        Change { previous, current }
-    }
-}
-
-/// Parses a value typed by a user: JSON if it is valid JSON (`42`, `[1, 2]`,
-/// `"text"`, `true`), a plain string otherwise (`info,sqlx=warn`).
-pub fn parse_value(raw: &str) -> Value {
-    let raw = raw.trim();
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-}
-
-fn as_list(key: &str, value: Option<Value>) -> Result<Vec<Value>, SettingsError> {
-    match value {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(items)) => Ok(items),
-        Some(_) => Err(SettingsError::NotAList(key.to_string())),
-    }
-}
-
-/// The base configuration with every valid stored override applied, one at a
-/// time so that an invalid one is skipped without affecting the others.
-async fn load_snapshot(
-    base: &Figment,
-    db: &DatabaseConnection,
-    catalog: &Catalog,
-    registry: &ModuleRegistry,
-) -> Result<Snapshot, SettingsError> {
-    let mut snapshot = build(base, BTreeMap::new(), BTreeMap::new(), registry)
-        .map_err(SettingsError::InvalidBase)?;
-
-    for row in repo::all(db).await? {
-        let reason = match serde_json::from_str::<Value>(&row.value) {
-            Err(error) => format!("the stored value is not valid JSON: {error}"),
-            Ok(value) => match catalog.resolve(&row.key) {
-                Err(error) => error.to_string(),
-                Ok(_) => {
-                    let mut overrides = snapshot.overrides.clone();
-                    overrides.insert(row.key.clone(), value);
-                    match build(base, overrides, snapshot.ignored.clone(), registry) {
-                        Ok(next) => {
-                            snapshot = next;
-                            continue;
-                        }
-                        Err(error) => error.to_string(),
-                    }
-                }
-            },
-        };
-
-        tracing::warn!(key = row.key, reason, "ignoring an invalid runtime setting");
-        snapshot.ignored.insert(row.key, reason);
-    }
-
-    tracing::info!(
-        overrides = snapshot.overrides.len(),
-        ignored = snapshot.ignored.len(),
-        "runtime settings loaded"
-    );
-    Ok(snapshot)
-}
-
-/// Layers the overrides on `base` and validates the result.
-fn build(
-    base: &Figment,
-    overrides: BTreeMap<String, Value>,
-    ignored: BTreeMap<String, String>,
-    registry: &ModuleRegistry,
-) -> Result<Snapshot, ConfigError> {
-    // Parents first, so that entry overrides win over whole-map overrides.
-    let mut ordered: Vec<_> = overrides.iter().collect();
-    ordered.sort_by_key(|(key, _)| key.matches('.').count());
-
-    // Figment merges maps key by key, which would mix an overriding map with
-    // the file's. Overwriting the key with a scalar first makes the override
-    // replace it instead.
-    let cleared = Value::Bool(false);
-    let figment = ordered
-        .into_iter()
-        .fold(base.clone(), |figment, (key, value)| {
-            let figment = if value.is_object() {
-                figment.merge(Override::new(key, &cleared))
-            } else {
-                figment
-            };
-            figment.merge(Override::new(key, value))
-        });
-
-    let config = AssistantConfig::from_figment(&figment)?;
-    let module_settings = registry
-        .validate_config(&config)
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-
-    Ok(Snapshot {
-        access: AccessControl::from_config(&config.telegram),
-        config,
-        module_settings,
-        overrides,
-        ignored,
-        figment,
-    })
+fn toggleable_modules(view: &dyn View) -> Vec<Choice> {
+    module_choices(view, true)
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use botconf::{Storage, StoredOverride};
+    use serde_json::{Value, json};
     use teloxide::types::ChatId;
 
     use super::*;
@@ -530,25 +236,41 @@ mod tests {
         test_support::{BASE_CONFIG, figment_from_toml},
     };
 
-    async fn store_with(db: DatabaseConnection, registry: &ModuleRegistry) -> SettingsStore {
-        SettingsStore::load(figment_from_toml(BASE_CONFIG), db, registry, None)
+    async fn store_with(db: DatabaseConnection) -> SettingsStore {
+        load(figment_from_toml(BASE_CONFIG), db, registry(), None)
             .await
             .expect("load settings")
     }
 
-    fn registry() -> ModuleRegistry {
-        ModuleRegistry::new(builtin()).unwrap()
+    /// The keys stored in the database.
+    async fn stored_keys(db: &DatabaseConnection) -> Vec<String> {
+        let stored = SeaOrmStorage::new(db.clone()).load().await.unwrap();
+        stored.into_iter().map(|stored| stored.key).collect()
+    }
+
+    /// Stores an override directly, e.g. one that became invalid.
+    async fn store_raw(db: &DatabaseConnection, key: &str, value: &str) {
+        let stored = StoredOverride {
+            key: key.into(),
+            value: value.into(),
+            by: None,
+        };
+        let storage = SeaOrmStorage::new(db.clone());
+        storage.write(&[], Some(&stored)).await.unwrap();
+    }
+
+    fn registry() -> Arc<ModuleRegistry> {
+        Arc::new(ModuleRegistry::new(builtin()).unwrap())
     }
 
     #[tokio::test]
     async fn without_overrides_the_file_wins() {
-        let registry = registry();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, BASE_CONFIG).unwrap();
 
         let base = AssistantConfig::figment(&path).unwrap();
-        let store = SettingsStore::load(base, memory_db().await, &registry, None)
+        let store = load(base, memory_db().await, registry(), None)
             .await
             .unwrap();
         let snapshot = store.current();
@@ -559,48 +281,41 @@ mod tests {
         assert_eq!(snapshot.value("telegram.sudo_users_id"), Some(json!([])));
 
         store
-            .set("telegram.sudo_users_id", json!([2]), None, &registry)
+            .set("telegram.sudo_users_id", json!([2]), None)
             .await
             .unwrap();
         assert_eq!(
             store.current().source("telegram.sudo_users_id"),
-            Source::Database
+            Source::Stored
         );
     }
 
     #[tokio::test]
     async fn set_applies_immediately_and_persists() {
-        let registry = registry();
         let db = memory_db().await;
-        let store = store_with(db.clone(), &registry).await;
+        let store = store_with(db.clone()).await;
 
         let change = store
-            .set(
-                "telegram.sudo_users_id",
-                json!([5, 6]),
-                Some(UserId(1)),
-                &registry,
-            )
+            .set("telegram.sudo_users_id", json!([5, 6]), Some(1))
             .await
             .unwrap();
-        assert!(!change.previous.access.is_sudo(UserId(5)));
-        assert!(change.current.access.is_sudo(UserId(5)));
-        assert!(store.current().access.is_sudo(UserId(6)));
+        assert!(!change.previous.access().is_sudo(UserId(5)));
+        assert!(change.current.access().is_sudo(UserId(5)));
+        assert!(store.current().access().is_sudo(UserId(6)));
         assert_eq!(
             store.current().source("telegram.sudo_users_id"),
-            Source::Database
+            Source::Stored
         );
 
         // A new store (i.e. a restart) sees the change.
-        let reloaded = store_with(db, &registry).await;
-        assert!(reloaded.current().access.is_sudo(UserId(5)));
+        let reloaded = store_with(db).await;
+        assert!(reloaded.current().access().is_sudo(UserId(5)));
     }
 
     #[tokio::test]
     async fn invalid_values_are_rejected_and_not_stored() {
-        let registry = registry();
         let db = memory_db().await;
-        let store = store_with(db.clone(), &registry).await;
+        let store = store_with(db.clone()).await;
 
         let cases = [
             ("telegram.sudo_users_id", json!("not a list")),
@@ -612,10 +327,7 @@ mod tests {
             ("modules.general.start_message", json!(42)),
         ];
         for (key, value) in cases {
-            let err = store
-                .set(key, value.clone(), None, &registry)
-                .await
-                .unwrap_err();
+            let err = store.set(key, value.clone(), None).await.unwrap_err();
             assert!(
                 matches!(err, SettingsError::InvalidValue { .. }),
                 "{key} = {value}: {err}"
@@ -623,18 +335,17 @@ mod tests {
         }
 
         for key in ["telegram.owner_id", "modules.general.nope"] {
-            let err = store.set(key, json!(2), None, &registry).await.unwrap_err();
+            let err = store.set(key, json!(2), None).await.unwrap_err();
             assert!(matches!(err, SettingsError::UnknownKey(_)), "{err}");
         }
 
         assert!(store.current().overrides().is_empty());
-        assert!(repo::all(&db).await.unwrap().is_empty());
+        assert!(stored_keys(&db).await.is_empty());
     }
 
     #[tokio::test]
     async fn module_settings_are_typed_and_editable() {
-        let registry = registry();
-        let store = store_with(memory_db().await, &registry).await;
+        let store = store_with(memory_db().await).await;
         let start_message = |store: &SettingsStore| {
             store
                 .current()
@@ -655,18 +366,13 @@ mod tests {
         );
 
         store
-            .set(
-                "modules.general.start_message",
-                json!("Hey {name}"),
-                None,
-                &registry,
-            )
+            .set("modules.general.start_message", json!("Hey {name}"), None)
             .await
             .unwrap();
         assert_eq!(start_message(&store).as_deref(), Some("Hey {name}"));
         assert_eq!(
             store.current().source("modules.general.start_message"),
-            Source::Database
+            Source::Stored
         );
         assert!(
             store
@@ -676,28 +382,24 @@ mod tests {
             "wrong type"
         );
 
-        store
-            .unset("modules.general.start_message", &registry)
-            .await
-            .unwrap();
+        store.unset("modules.general.start_message").await.unwrap();
         assert_eq!(start_message(&store), None);
     }
 
     #[tokio::test]
     async fn add_and_remove_edit_lists() {
-        let registry = registry();
-        let store = store_with(memory_db().await, &registry).await;
+        let store = store_with(memory_db().await).await;
 
         store
-            .add("telegram.allowed_users.general", json!(3), None, &registry)
+            .add("telegram.allowed_users.general", json!(3), None)
             .await
             .unwrap();
         store
-            .add("telegram.allowed_users.general", json!(4), None, &registry)
+            .add("telegram.allowed_users.general", json!(4), None)
             .await
             .unwrap();
         store
-            .add("telegram.allowed_users.general", json!(3), None, &registry)
+            .add("telegram.allowed_users.general", json!(3), None)
             .await
             .unwrap();
         assert_eq!(
@@ -706,7 +408,7 @@ mod tests {
         );
 
         store
-            .remove("telegram.allowed_users.general", json!(3), None, &registry)
+            .remove("telegram.allowed_users.general", json!(3), None)
             .await
             .unwrap();
         assert_eq!(
@@ -715,7 +417,7 @@ mod tests {
         );
 
         let err = store
-            .add("logging.filter", json!("x"), None, &registry)
+            .add("logging.filter", json!("x"), None)
             .await
             .unwrap_err();
         assert!(matches!(err, SettingsError::NotAList(_)), "{err}");
@@ -723,20 +425,14 @@ mod tests {
 
     #[tokio::test]
     async fn entries_win_over_maps_and_setting_a_map_replaces_them() {
-        let registry = registry();
-        let store = store_with(memory_db().await, &registry).await;
+        let store = store_with(memory_db().await).await;
 
         store
-            .set(
-                "telegram.allowed_chats.general",
-                json!([-5]),
-                None,
-                &registry,
-            )
+            .set("telegram.allowed_chats.general", json!([-5]), None)
             .await
             .unwrap();
         store
-            .set("telegram.allowed_chats", json!({}), None, &registry)
+            .set("telegram.allowed_chats", json!({}), None)
             .await
             .unwrap();
 
@@ -748,12 +444,7 @@ mod tests {
         );
 
         store
-            .set(
-                "telegram.allowed_chats.general",
-                json!([-7]),
-                None,
-                &registry,
-            )
+            .set("telegram.allowed_chats.general", json!([-7]), None)
             .await
             .unwrap();
         let snapshot = store.current();
@@ -765,11 +456,10 @@ mod tests {
 
     #[tokio::test]
     async fn map_overrides_replace_the_files_maps() {
-        let registry = registry();
         let base = figment_from_toml(&format!(
             "{BASE_CONFIG}allowed_chats = {{ general = [-5] }}\n"
         ));
-        let store = SettingsStore::load(base, memory_db().await, &registry, None)
+        let store = load(base, memory_db().await, registry(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -778,23 +468,22 @@ mod tests {
         );
 
         store
-            .set("telegram.allowed_chats", json!({}), None, &registry)
+            .set("telegram.allowed_chats", json!({}), None)
             .await
             .unwrap();
         assert!(store.current().config.telegram.allowed_chats.is_empty());
         assert_eq!(
             store.current().source("telegram.allowed_chats"),
-            Source::Database
+            Source::Stored
         );
     }
 
     #[tokio::test]
     async fn extend_adds_the_missing_items_at_once() {
-        let registry = registry();
-        let store = store_with(memory_db().await, &registry).await;
+        let store = store_with(memory_db().await).await;
 
         store
-            .add("telegram.sudo_users_id", json!(2), None, &registry)
+            .add("telegram.sudo_users_id", json!(2), None)
             .await
             .unwrap();
         store
@@ -802,7 +491,6 @@ mod tests {
                 "telegram.sudo_users_id",
                 vec![json!(2), json!(3), json!(4)],
                 None,
-                &registry,
             )
             .await
             .unwrap();
@@ -814,31 +502,25 @@ mod tests {
 
     #[tokio::test]
     async fn delete_entry_removes_entries_from_anywhere() {
-        let registry = registry();
         let base = figment_from_toml(&format!(
             "{BASE_CONFIG}allowed_chats = {{ general = [-5], lights = [-6] }}\n"
         ));
-        let store = SettingsStore::load(base, memory_db().await, &registry, None)
+        let store = load(base, memory_db().await, registry(), None)
             .await
             .unwrap();
         store
-            .set("telegram.allowed_chats.notes", json!([-7]), None, &registry)
+            .set("telegram.allowed_chats.notes", json!([-7]), None)
             .await
             .unwrap_err();
         store
-            .set(
-                "telegram.allowed_chats.lights",
-                json!([-8]),
-                None,
-                &registry,
-            )
+            .set("telegram.allowed_chats.lights", json!([-8]), None)
             .await
             .unwrap();
 
         // From the file, and from a per-entry override.
         for name in ["general", "lights"] {
             store
-                .delete_entry(&format!("telegram.allowed_chats.{name}"), None, &registry)
+                .delete_entry(&format!("telegram.allowed_chats.{name}"), None)
                 .await
                 .unwrap();
         }
@@ -849,43 +531,29 @@ mod tests {
         );
 
         assert!(matches!(
-            store
-                .delete_entry("telegram.allowed_chats", None, &registry)
-                .await,
+            store.delete_entry("telegram.allowed_chats", None).await,
             Err(SettingsError::NotAnEntry(_))
         ));
     }
 
     #[tokio::test]
     async fn unset_falls_back_to_the_file() {
-        let registry = registry();
         let db = memory_db().await;
-        let store = store_with(db.clone(), &registry).await;
+        let store = store_with(db.clone()).await;
 
-        assert!(
-            store
-                .unset("logging.filter", &registry)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(store.unset("logging.filter").await.unwrap().is_none());
 
         store
-            .set(
-                "telegram.allowed_users.general",
-                json!([9]),
-                None,
-                &registry,
-            )
+            .set("telegram.allowed_users.general", json!([9]), None)
             .await
             .unwrap();
         store
-            .set("logging.filter", json!("debug"), None, &registry)
+            .set("logging.filter", json!("debug"), None)
             .await
             .unwrap();
 
         let change = store
-            .unset("telegram.allowed_users", &registry)
+            .unset("telegram.allowed_users")
             .await
             .unwrap()
             .unwrap();
@@ -900,36 +568,22 @@ mod tests {
         assert!(change.current.config.telegram.allowed_users.is_empty());
         assert_eq!(store.current().config.logging.filter, "debug");
 
-        let keys: Vec<_> = repo::all(&db)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.key)
-            .collect();
+        let keys: Vec<_> = stored_keys(&db).await;
         assert_eq!(keys, ["logging.filter"]);
     }
 
     #[tokio::test]
     async fn invalid_stored_overrides_are_ignored_at_load() {
-        let registry = registry();
         let db = memory_db().await;
-        repo::upsert(&db, "telegram.sudo_users_id", "[5]", None)
-            .await
-            .unwrap();
-        repo::upsert(&db, "modules.disabled", "[\"gone\"]", None)
-            .await
-            .unwrap();
-        repo::upsert(&db, "telegram.bot_token", "\"x\"", None)
-            .await
-            .unwrap();
-        repo::upsert(&db, "logging.filter", "not json", None)
-            .await
-            .unwrap();
+        store_raw(&db, "telegram.sudo_users_id", "[5]").await;
+        store_raw(&db, "modules.disabled", "[\"gone\"]").await;
+        store_raw(&db, "telegram.bot_token", "\"x\"").await;
+        store_raw(&db, "logging.filter", "not json").await;
 
-        let store = store_with(db.clone(), &registry).await;
+        let store = store_with(db.clone()).await;
         let snapshot = store.current();
 
-        assert!(snapshot.access.is_sudo(UserId(5)));
+        assert!(snapshot.access().is_sudo(UserId(5)));
         assert_eq!(
             snapshot.ignored().keys().collect::<Vec<_>>(),
             ["logging.filter", "modules.disabled", "telegram.bot_token"]
@@ -937,31 +591,26 @@ mod tests {
         assert_eq!(snapshot.config.telegram.bot_token.expose(), "t");
 
         // Ignored overrides can be cleaned up.
-        store
-            .unset("modules.disabled", &registry)
-            .await
-            .unwrap()
-            .unwrap();
+        store.unset("modules.disabled").await.unwrap().unwrap();
         assert!(!store.current().ignored().contains_key("modules.disabled"));
-        assert_eq!(repo::all(&db).await.unwrap().len(), 3);
+        assert_eq!(stored_keys(&db).await.len(), 3);
     }
 
     #[tokio::test]
     async fn reload_picks_up_changes_made_elsewhere() {
-        let registry = registry();
         let db = memory_db().await;
-        let bot = store_with(db.clone(), &registry).await;
+        let bot = store_with(db.clone()).await;
         // E.g. the `settings` CLI command, in another process.
-        let cli = store_with(db, &registry).await;
+        let cli = store_with(db).await;
 
-        cli.set("telegram.sudo_users_id", json!([7]), None, &registry)
+        cli.set("telegram.sudo_users_id", json!([7]), None)
             .await
             .unwrap();
-        assert!(!bot.current().access.is_sudo(UserId(7)));
+        assert!(!bot.current().access().is_sudo(UserId(7)));
 
-        let change = bot.reload(&registry).await.unwrap();
-        assert!(!change.previous.access.is_sudo(UserId(7)));
-        assert!(bot.current().access.is_sudo(UserId(7)));
+        let change = bot.reload().await.unwrap();
+        assert!(!change.previous.access().is_sudo(UserId(7)));
+        assert!(bot.current().access().is_sudo(UserId(7)));
     }
 
     #[test]

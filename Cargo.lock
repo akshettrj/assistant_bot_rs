@@ -340,6 +340,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "botconf",
  "chrono",
  "chrono-tz",
  "clap",
@@ -514,6 +515,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "botconf"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "figment",
+ "futures",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

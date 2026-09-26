@@ -40,7 +40,7 @@ use crate::{
     modules::{HandlerResult, Module, ModuleInfo, UpdateHandler},
     prompts::{self, Answer},
     settings::{
-        SettingsError,
+        SettingsError, actor,
         command::{self, Outcome},
         kind::Kind,
         parse_value,
@@ -128,10 +128,10 @@ async fn handle_command(
         }
         Ok(Action::Help) => (escape(USAGE), None),
         Ok(Action::Run(command)) => {
-            match command::execute(&ctx.settings, &ctx.modules, command, user).await {
+            match command::execute(&ctx.settings, command, actor(user)).await {
                 Ok(outcome) => (text::render(&outcome), Some(outcome)),
                 // Infrastructure failures go to the error reporter.
-                Err(SettingsError::Db(error)) => return Err(error.into()),
+                Err(error @ SettingsError::Storage(_)) => return Err(error.into()),
                 Err(error) => (format!("❌ {}", escape(&error.to_string())), None),
             }
         }
@@ -240,7 +240,7 @@ async fn handle_button(
                 command_menu::sync(&bot, &ctx, Some(&change.previous)).await;
             }
         }
-        Err(SettingsError::Db(error)) => return Err(error.into()),
+        Err(error @ SettingsError::Storage(_)) => return Err(error.into()),
         Err(error) => {
             answer(&format!("❌ {error}"), true).await?;
         }
@@ -260,7 +260,7 @@ fn edit_for(ctx: &AppContext, button: Button) -> Result<(Edit, Page), &'static s
             let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
             let choice = setting
                 .kind
-                .choices(&snapshot, &ctx.modules)
+                .choices(snapshot.as_ref())
                 .into_iter()
                 .nth(choice)
                 .ok_or(NO_CHOICE)?;
@@ -280,7 +280,7 @@ fn edit_for(ctx: &AppContext, button: Button) -> Result<(Edit, Page), &'static s
             let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
             let choice = setting
                 .kind
-                .choices(&snapshot, &ctx.modules)
+                .choices(snapshot.as_ref())
                 .into_iter()
                 .nth(choice)
                 .ok_or(NO_CHOICE)?;
@@ -365,7 +365,7 @@ async fn handle_answer(
                 }
                 return Ok(());
             }
-            Err(SettingsError::Db(error)) => return Err(error.into()),
+            Err(error @ SettingsError::Storage(_)) => return Err(error.into()),
             Err(error) => error.to_string(),
         },
         Err(ReadError::Retry(problem)) => problem,
@@ -437,6 +437,7 @@ mod tests {
     use teloxide::types::{InlineKeyboardButtonKind, UserId};
 
     use super::{callback::Target, *};
+    use crate::settings::SnapshotExt;
     use crate::{
         modules::builtin,
         test_support::{BASE_CONFIG, context},

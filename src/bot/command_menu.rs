@@ -11,7 +11,11 @@ use teloxide::{
     types::{BotCommand, BotCommandScope, ChatId, Recipient, UserId},
 };
 
-use crate::{bot::AssistantBot, context::AppContext, settings::Snapshot};
+use crate::{
+    bot::AssistantBot,
+    context::AppContext,
+    settings::{Snapshot, SnapshotExt},
+};
 
 /// Telegram's limit of commands per scope.
 const MAX_COMMANDS_PER_SCOPE: usize = 100;
@@ -24,8 +28,8 @@ const MAX_COMMANDS_PER_SCOPE: usize = 100;
 /// cannot have a private-chat scope.
 pub async fn sync(bot: &AssistantBot, ctx: &AppContext, previous: Option<&Snapshot>) {
     let settings = ctx.settings.current();
-    let users = settings.access.privileged_users();
-    let chats = settings.access.privileged_chats();
+    let users = settings.access().privileged_users();
+    let chats = settings.access().privileged_chats();
 
     set_commands(
         bot,
@@ -47,13 +51,13 @@ pub async fn sync(bot: &AssistantBot, ctx: &AppContext, previous: Option<&Snapsh
 
     if let Some(previous) = previous {
         let demoted_users = previous
-            .access
+            .access()
             .privileged_users()
             .into_iter()
             .filter(|user| !users.contains(user))
             .map(ChatId::from);
         let demoted_chats = previous
-            .access
+            .access()
             .privileged_chats()
             .into_iter()
             .filter(|chat| !chats.contains(chat));

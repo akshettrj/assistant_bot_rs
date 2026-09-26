@@ -1,11 +1,12 @@
 //! The changes the settings panel makes, and how they are applied.
 
+use botconf::Schema;
 use serde_json::Value;
 use teloxide::types::UserId;
 
 use crate::{
     context::AppContext,
-    settings::{Change, SettingsError},
+    settings::{Change, SettingsError, actor},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,15 +37,15 @@ pub async fn apply(
     by: Option<UserId>,
 ) -> Result<Applied, SettingsError> {
     let store = &ctx.settings;
-    let modules = &ctx.modules;
+    let by = actor(by);
 
     let change = match edit {
-        Edit::Set(key, value) => store.set(&key, value, by, modules).await?,
-        Edit::Extend(key, items) => store.extend(&key, items, by, modules).await?,
-        Edit::Remove(key, item) => store.remove(&key, item, by, modules).await?,
-        Edit::DeleteEntry(key) => store.delete_entry(&key, by, modules).await?,
+        Edit::Set(key, value) => store.set(&key, value, by).await?,
+        Edit::Extend(key, items) => store.extend(&key, items, by).await?,
+        Edit::Remove(key, item) => store.remove(&key, item, by).await?,
+        Edit::DeleteEntry(key) => store.delete_entry(&key, by).await?,
         Edit::Reset(key) => {
-            return Ok(match store.unset(&key, modules).await? {
+            return Ok(match store.unset(&key).await? {
                 Some(change) => Applied {
                     notice: "↩️ Back to the config file's value".into(),
                     change: Some(change),
@@ -56,7 +57,7 @@ pub async fn apply(
             });
         }
         Edit::Reload => {
-            let change = store.reload(modules).await?;
+            let change = store.reload().await?;
             let notice = format!(
                 "🔄 Reloaded: {} stored setting(s) applied, {} ignored",
                 change.current.overrides().len(),
@@ -70,7 +71,7 @@ pub async fn apply(
     };
 
     let mut notice = "✅ Saved".to_string();
-    for lint in modules.lint_config(&change.current.config) {
+    for lint in store.schema().lint(&change.current) {
         notice.push_str(&format!("\n⚠️ {lint}"));
     }
     Ok(Applied {

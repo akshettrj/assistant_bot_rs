@@ -10,9 +10,9 @@ use crate::{
 #[derive(Debug)]
 pub struct AppContext {
     /// The effective configuration, including the runtime settings.
-    pub settings: SettingsStore,
+    pub settings: Arc<SettingsStore>,
     pub db: DatabaseConnection,
-    pub modules: ModuleRegistry,
+    pub modules: Arc<ModuleRegistry>,
     /// The questions waiting for an answer.
     pub prompts: Prompts,
     /// Names for user and chat ids.
@@ -23,10 +23,10 @@ impl AppContext {
     pub fn new(
         settings: SettingsStore,
         db: DatabaseConnection,
-        modules: ModuleRegistry,
+        modules: Arc<ModuleRegistry>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            settings,
+            settings: Arc::new(settings),
             db,
             modules,
             prompts: Prompts::default(),

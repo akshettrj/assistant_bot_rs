@@ -17,7 +17,7 @@ use crate::{
     context::AppContext,
     directory::Name,
     settings::{
-        Snapshot, Source,
+        Snapshot, SnapshotExt, Source,
         keys::{CatalogEntry, is_below},
         kind::{Choice, Field, Kind},
     },
@@ -277,14 +277,14 @@ fn setting_rows(
         .entries()
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.module == module)
+        .filter(|(_, entry)| entry.section == module)
         .filter_map(|(position, entry)| {
             let target = Target::setting(position);
             let setting = Setting::resolve(ctx, &target)?;
             let label = format!(
                 "{}: {}{}",
                 entry.title,
-                summary(ctx, snapshot, &setting),
+                summary(snapshot, &setting),
                 changed_marker(snapshot, &entry.key)
             );
             button(&label, Button::Open(Page::Setting(target))).map(|button| vec![button])
@@ -309,7 +309,7 @@ async fn setting(
     );
     if setting.field.is_none() {
         let source = match snapshot.source(&key) {
-            Source::Database => "changed from Telegram ✏️".to_string(),
+            Source::Stored => "changed from Telegram ✏️".to_string(),
             Source::File => "from the config file".to_string(),
             Source::Environment => "from the environment".to_string(),
             Source::Default => "the default".to_string(),
@@ -331,7 +331,7 @@ async fn setting(
             .then(|| button(label, Button::Clear(target.clone())))
             .flatten()
     };
-    let choices = setting.kind.choices(snapshot, &ctx.modules);
+    let choices = setting.kind.choices(snapshot);
 
     let details = match setting.kind {
         Kind::Json => {
@@ -473,7 +473,7 @@ async fn setting(
                     continue;
                 };
                 let summary = match field_setting.value(snapshot) {
-                    Some(_) => summary(ctx, snapshot, &field_setting),
+                    Some(_) => summary(snapshot, &field_setting),
                     None => "—".to_string(),
                 };
                 lines.push(format!("• {}: {}", bold(field.title), escape(&summary)));
@@ -496,7 +496,7 @@ async fn setting(
                 let Some(entry) = Setting::resolve(ctx, &entry_target) else {
                     continue;
                 };
-                let summary = summary(ctx, snapshot, &entry);
+                let summary = summary(snapshot, &entry);
                 lines.push(format!("• {}: {}", bold(&escape(name)), escape(&summary)));
                 row(vec![button(
                     &format!(
@@ -555,7 +555,7 @@ async fn setting(
         }
     }
 
-    let back = match (target.parent(), setting.setting.module) {
+    let back = match (target.parent(), setting.setting.section) {
         (Some(parent), _) => Page::Setting(parent),
         (None, Some(module)) => Page::Module(module.to_string()),
         (None, None) => Page::Home,
@@ -585,7 +585,7 @@ fn excluded_fields(setting: &Setting<'_>) -> Option<String> {
 }
 
 /// A short description of the value, for buttons.
-fn summary(ctx: &AppContext, snapshot: &Snapshot, setting: &Setting<'_>) -> String {
+fn summary(snapshot: &Snapshot, setting: &Setting<'_>) -> String {
     let Some(value) = setting.value(snapshot) else {
         return "not set".to_string();
     };
@@ -598,7 +598,7 @@ fn summary(ctx: &AppContext, snapshot: &Snapshot, setting: &Setting<'_>) -> Stri
     let summary = match setting.kind {
         Kind::SetOf { choices, inverted } => {
             let listed = list(Some(&value));
-            let choices = choices.resolve(snapshot, &ctx.modules);
+            let choices = choices.resolve(snapshot);
             let on = choices
                 .iter()
                 .filter(|choice| listed.contains(&Value::String(choice.value.clone())) != inverted)
@@ -632,7 +632,7 @@ fn summary(ctx: &AppContext, snapshot: &Snapshot, setting: &Setting<'_>) -> Stri
             }
         }
         Kind::Number { unit, .. } => format!("{}{unit}", plain(&value)),
-        Kind::OneOf { choices, .. } => label_of(&value, &choices.resolve(snapshot, &ctx.modules)),
+        Kind::OneOf { choices, .. } => label_of(&value, &choices.resolve(snapshot)),
         Kind::Text { .. } | Kind::Chat | Kind::Json => plain(&value),
     };
     truncate(&summary, MAX_LABEL_CHARS)
@@ -707,7 +707,7 @@ fn is_overridden(snapshot: &Snapshot, key: &str) -> bool {
 }
 
 fn changed_marker(snapshot: &Snapshot, key: &str) -> &'static str {
-    if snapshot.source(key) == Source::Database || is_overridden(snapshot, key) {
+    if snapshot.source(key) == Source::Stored || is_overridden(snapshot, key) {
         " ✏️"
     } else {
         ""

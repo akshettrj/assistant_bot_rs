@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use botconf::Section;
 use teloxide::{
     dptree,
     types::{BotCommand, ChatId, Update, UpdateKind, UserId},
@@ -15,11 +16,8 @@ use crate::{
     config::AssistantConfig,
     context::AppContext,
     modules::{Module, ModuleInfo, UpdateHandler},
-    settings::{ModuleSettings, ParsedSettings, Snapshot},
+    settings::{ModuleSettings, Snapshot, SnapshotExt},
 };
-
-/// The validated settings sections, by module id.
-pub type ModuleSettingsMap = HashMap<&'static str, ParsedSettings>;
 
 /// Errors caught while loading the modules or validating the configuration
 /// against them.
@@ -175,20 +173,17 @@ impl ModuleRegistry {
     ) -> impl Iterator<Item = &'a RegisteredModule> + 'a {
         self.enabled(settings).filter(move |module| {
             settings
-                .access
+                .access()
                 .can_use(module.info.id, module.info.access, user, chat)
         })
     }
 
-    /// Checks the config against the modules and returns their parsed
-    /// settings sections.
+    /// Checks the config against the modules, their settings sections
+    /// included.
     ///
     /// Module ids in the config must exist, otherwise a typo would silently
     /// deny access (or fail to disable a module).
-    pub fn validate_config(
-        &self,
-        config: &AssistantConfig,
-    ) -> Result<ModuleSettingsMap, RegistryError> {
+    pub fn validate_config(&self, config: &AssistantConfig) -> Result<(), RegistryError> {
         let references = [
             (
                 "modules.disabled",
@@ -221,13 +216,10 @@ impl ModuleRegistry {
             return Err(RegistryError::CannotDisable(module.info.id));
         }
 
-        self.parse_module_settings(config)
+        self.check_module_settings(config)
     }
 
-    fn parse_module_settings(
-        &self,
-        config: &AssistantConfig,
-    ) -> Result<ModuleSettingsMap, RegistryError> {
+    fn check_module_settings(&self, config: &AssistantConfig) -> Result<(), RegistryError> {
         let sections = &config.modules.sections;
         if let Some(id) = sections
             .keys()
@@ -236,13 +228,32 @@ impl ModuleRegistry {
             return Err(RegistryError::UnknownSection(id.clone()));
         }
 
+        for module in self.iter() {
+            let (id, Some(settings)) = (module.info.id, module.settings) else {
+                continue;
+            };
+            settings
+                .parse(sections.get(id))
+                .map_err(|reason| RegistryError::InvalidModuleSettings { module: id, reason })?;
+        }
+        Ok(())
+    }
+
+    /// The modules' settings, as sections of the configuration at
+    /// `modules.<id>`.
+    pub fn sections(&self) -> Vec<Section> {
         self.iter()
-            .filter_map(|module| Some((module.info.id, module.settings?)))
-            .map(|(id, settings)| {
-                let parsed = settings.parse(sections.get(id)).map_err(|reason| {
-                    RegistryError::InvalidModuleSettings { module: id, reason }
-                })?;
-                Ok((id, parsed))
+            .filter_map(|module| {
+                let info = module.info;
+                let settings = module.settings?;
+                let path = format!("modules.{}", info.id);
+                Some(Section::new(
+                    info.id,
+                    path,
+                    info.name,
+                    info.description,
+                    settings,
+                ))
             })
             .collect()
     }
@@ -309,7 +320,7 @@ fn access_gate(info: ModuleInfo) -> UpdateHandler {
 
         let user = update.from().map(|user| user.id);
         let chat = update.chat().map(|chat| chat.id);
-        let allowed = settings.access.can_use(info.id, info.access, user, chat);
+        let allowed = settings.access().can_use(info.id, info.access, user, chat);
         if !allowed {
             tracing::trace!(module = info.id, ?user, ?chat, "access denied");
         }
@@ -478,7 +489,7 @@ allowed_users = { restricted = [3] }
     }
 
     #[test]
-    fn module_sections_are_validated_and_parsed() {
+    fn module_sections_are_validated() {
         let registry = ModuleRegistry::new(vec![
             TestModule::arc("restricted", AccessPolicy::Restricted),
             with_settings(&[]),
@@ -488,11 +499,15 @@ allowed_users = { restricted = [3] }
             registry.validate_config(&config_from_toml(&format!("{CONFIG}{sections}")))
         };
 
-        let parsed = check("").unwrap();
-        assert_eq!(parsed["stub"].typed::<StubSettings>().unwrap().limit, 0);
+        check("").unwrap();
+        check("\n[modules.stub]\nlimit = 3\n").unwrap();
 
-        let parsed = check("\n[modules.stub]\nlimit = 3\n").unwrap();
-        assert_eq!(parsed["stub"].typed::<StubSettings>().unwrap().limit, 3);
+        let sections = registry.sections();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(
+            (sections[0].id, sections[0].path.as_str()),
+            ("stub", "modules.stub")
+        );
 
         assert!(matches!(
             check("\n[modules.stub]\nlimit = \"x\"\n").unwrap_err(),
@@ -624,7 +639,7 @@ allowed_users = { restricted = [3] }
         assert_eq!(ids(4), ["public"]);
 
         ctx.settings
-            .set("modules.disabled", json!(["public"]), None, &ctx.modules)
+            .set("modules.disabled", json!(["public"]), None)
             .await
             .unwrap();
         assert_eq!(ids(4), Vec::<&str>::new());
@@ -657,20 +672,14 @@ allowed_users = { restricted = [3] }
         assert!(handled(3).await, "allowed user is let through");
         assert!(!handled(4).await, "stranger is not");
 
-        let registry = &ctx.modules;
         ctx.settings
-            .add(
-                "telegram.allowed_users.restricted",
-                json!(4),
-                None,
-                registry,
-            )
+            .add("telegram.allowed_users.restricted", json!(4), None)
             .await
             .unwrap();
         assert!(handled(4).await, "newly allowed user is let through");
 
         ctx.settings
-            .set("modules.disabled", json!(["restricted"]), None, registry)
+            .set("modules.disabled", json!(["restricted"]), None)
             .await
             .unwrap();
         assert!(

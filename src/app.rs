@@ -1,5 +1,7 @@
 //! Startup orchestration: turns the CLI arguments into a running assistant.
 
+use std::sync::Arc;
+
 use anyhow::Context as _;
 
 use crate::{
@@ -9,7 +11,7 @@ use crate::{
     context::AppContext,
     db, modules,
     modules::ModuleRegistry,
-    settings::{SettingsStore, command},
+    settings::{self, command},
     telemetry,
 };
 
@@ -20,7 +22,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let log_filter = telemetry::init(&config.logging)?;
 
     // The file must be valid on its own: the runtime settings are optional.
-    let registry = ModuleRegistry::new(modules::builtin())?;
+    let registry = Arc::new(ModuleRegistry::new(modules::builtin())?);
     registry.validate_config(&config)?;
     for lint in registry.lint_config(&config) {
         tracing::warn!("{lint}");
@@ -48,11 +50,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Settings(action) => {
             let db = connect_and_migrate(&config).await?;
             // No log filter handle: changes are for the bot, not this process.
-            let settings = SettingsStore::load(base, db, &registry, None)
+            let settings = settings::load(base, db, Arc::clone(&registry), None)
                 .await
                 .context("failed to load the runtime settings")?;
 
-            let outcome = command::execute(&settings, &registry, action.into(), None).await?;
+            let outcome = command::execute(&settings, action.into(), None).await?;
             println!("{}", cli::render_settings_outcome(&outcome));
             if outcome.change().is_some() {
                 eprintln!("note: a running bot applies this after `/config reload` or a restart");
@@ -61,7 +63,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Light { args } => {
             let db = connect_and_migrate(&config).await?;
-            let settings = SettingsStore::load(base, db.clone(), &registry, None)
+            let settings = settings::load(base, db.clone(), Arc::clone(&registry), None)
                 .await
                 .context("failed to load the runtime settings")?;
             let ctx = AppContext::new(settings, db, registry);
@@ -94,9 +96,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Run => {
             let db = connect_and_migrate(&config).await?;
-            let settings = SettingsStore::load(base, db.clone(), &registry, Some(log_filter))
-                .await
-                .context("failed to load the runtime settings")?;
+            let settings =
+                settings::load(base, db.clone(), Arc::clone(&registry), Some(log_filter))
+                    .await
+                    .context("failed to load the runtime settings")?;
 
             // Boxed: the dispatcher future is ~30 KB.
             Box::pin(bot::run(AppContext::new(settings, db, registry))).await

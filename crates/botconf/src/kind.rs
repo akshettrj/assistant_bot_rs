@@ -1,6 +1,6 @@
-//! What the value of a runtime setting looks like, so that front ends (the
-//! Telegram settings panel) can offer a fitting editor: toggles, pickers, a
-//! list of users, a form, ...
+//! What the value of a runtime setting looks like, so that front ends (e.g. a
+//! chat settings panel) can offer a fitting editor: toggles, pickers, a list
+//! of users, a form, ...
 //!
 //! The kind is only a hint for editing: every value is still validated by
 //! deserializing the whole configuration.
@@ -9,8 +9,7 @@ use std::fmt;
 
 use serde_json::Value;
 
-use super::Snapshot;
-use crate::modules::ModuleRegistry;
+use crate::View;
 
 /// The shape of a runtime setting's value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,7 +43,8 @@ pub enum Kind {
     /// A list of some of `choices`, toggled on and off.
     SetOf {
         choices: Choices,
-        /// Whether being listed means "off" (e.g. `modules.disabled`).
+        /// Whether being listed means "off" (e.g. a list of disabled
+        /// features).
         inverted: bool,
     },
     /// A chat id.
@@ -56,7 +56,7 @@ pub enum Kind {
     /// An object whose fields are edited one by one.
     Form(&'static Form),
     /// A map of named entries, set one by one (see
-    /// [`RuntimeSetting::per_entry`](super::keys::RuntimeSetting::per_entry)).
+    /// [`RuntimeSetting::per_entry`](crate::RuntimeSetting::per_entry)).
     Map {
         /// The names entries may have, if limited.
         names: Option<Choices>,
@@ -76,22 +76,17 @@ impl Kind {
     }
 
     /// The choices offered as buttons, in their order.
-    pub fn choices(&self, snapshot: &Snapshot, modules: &ModuleRegistry) -> Vec<Choice> {
+    pub fn choices(&self, view: &dyn View) -> Vec<Choice> {
         match self {
-            Self::OneOf { choices, .. } | Self::SetOf { choices, .. } => {
-                choices.resolve(snapshot, modules)
-            }
+            Self::OneOf { choices, .. } | Self::SetOf { choices, .. } => choices.resolve(view),
             Self::Map {
                 names: Some(names), ..
-            } => names.resolve(snapshot, modules),
+            } => names.resolve(view),
             Self::Number {
                 unit, suggestions, ..
             } => suggestions
                 .iter()
-                .map(|number| Choice {
-                    value: number.to_string(),
-                    label: format!("{number}{unit}"),
-                })
+                .map(|number| Choice::new(number.to_string(), format!("{number}{unit}")))
                 .collect(),
             _ => Vec::new(),
         }
@@ -150,20 +145,17 @@ impl Field {
 pub enum Choices {
     /// A fixed set.
     Fixed(&'static [FixedChoice]),
-    /// The ids of the modules.
-    Modules,
-    /// The ids of the modules that can be disabled.
-    ToggleableModules,
     /// The names of the entries of a map-valued config key, e.g. the lights
     /// in `modules.lights.devices`.
     KeysOf(&'static str),
-    /// Computed by the module from the current configuration.
+    /// Computed from the current configuration (see [`View`] for what it
+    /// can read).
     Dynamic(DynamicChoices),
 }
 
 /// A function listing choices, e.g. the scenes a light knows.
 #[derive(Clone, Copy)]
-pub struct DynamicChoices(pub fn(&Snapshot) -> Vec<Choice>);
+pub struct DynamicChoices(pub fn(&dyn View) -> Vec<Choice>);
 
 impl PartialEq for DynamicChoices {
     fn eq(&self, other: &Self) -> bool {
@@ -210,30 +202,20 @@ impl Choice {
 
 impl Choices {
     /// The current choices, in a stable order.
-    pub fn resolve(&self, snapshot: &Snapshot, modules: &ModuleRegistry) -> Vec<Choice> {
-        let module_choices = |toggleable_only: bool| {
-            modules
-                .iter()
-                .filter(|module| !(toggleable_only && module.always_enabled))
-                .map(|module| Choice::new(module.info.id, module.info.name))
-                .collect()
-        };
-
+    pub fn resolve(&self, view: &dyn View) -> Vec<Choice> {
         match self {
             Self::Fixed(choices) => choices
                 .iter()
                 .map(|choice| Choice::new(choice.value, choice.label))
                 .collect(),
-            Self::Modules => module_choices(false),
-            Self::ToggleableModules => module_choices(true),
-            Self::KeysOf(key) => match snapshot.value(key) {
+            Self::KeysOf(key) => match view.value(key) {
                 Some(Value::Object(entries)) => entries
                     .keys()
                     .map(|name| Choice::new(name.clone(), name.clone()))
                     .collect(),
                 _ => Vec::new(),
             },
-            Self::Dynamic(DynamicChoices(list)) => list(snapshot),
+            Self::Dynamic(DynamicChoices(list)) => list(view),
         }
     }
 }

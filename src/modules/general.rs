@@ -17,7 +17,7 @@ use crate::{
     bot::AssistantBot,
     context::AppContext,
     modules::{HandlerResult, Module, ModuleInfo, RegisteredModule, UpdateHandler},
-    settings::{ModuleSettings, keys::RuntimeSetting, kind::Kind},
+    settings::{ModuleSettings, SnapshotExt, keys::RuntimeSetting, kind::Kind},
 };
 
 pub const ID: &str = "general";

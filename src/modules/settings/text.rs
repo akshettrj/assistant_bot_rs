@@ -157,7 +157,6 @@ fn value_line(entry: &ValueEntry) -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use teloxide::types::UserId;
 
     use super::*;
     use crate::{
@@ -220,29 +219,20 @@ mod tests {
 
         let outcome = command::execute(
             &ctx.settings,
-            &ctx.modules,
             SettingsCommand::Set("telegram.sudo_users_id".into(), "[5]".into()),
-            Some(UserId(1)),
+            Some(1),
         )
         .await
         .unwrap();
         let text = render(&outcome);
         assert!(text.starts_with("✅"), "{text}");
-        assert!(
-            text.contains("[5]") && text.contains("(database)"),
-            "{text}"
-        );
+        assert!(text.contains("[5]") && text.contains("(stored)"), "{text}");
 
         ctx.settings
-            .set(
-                "telegram.allowed_users.general",
-                json!([3]),
-                None,
-                &ctx.modules,
-            )
+            .set("telegram.allowed_users.general", json!([3]), None)
             .await
             .unwrap();
-        let outcome = command::execute(&ctx.settings, &ctx.modules, SettingsCommand::List, None)
+        let outcome = command::execute(&ctx.settings, SettingsCommand::List, None)
             .await
             .unwrap();
         let text = render(&outcome);

@@ -37,7 +37,7 @@ pub(crate) mod test_support {
         context::AppContext,
         db::test_support::memory_db,
         modules::{Module, ModuleRegistry},
-        settings::SettingsStore,
+        settings,
     };
 
     /// A minimal valid configuration.
@@ -59,10 +59,15 @@ owner_id = 1
     /// A full context over an in-memory database.
     pub async fn context(toml: &str, modules: Vec<Arc<dyn Module>>) -> Arc<AppContext> {
         let db = memory_db().await;
-        let registry = ModuleRegistry::new(modules).expect("valid modules");
-        let settings = SettingsStore::load(figment_from_toml(toml), db.clone(), &registry, None)
-            .await
-            .expect("valid settings");
+        let registry = Arc::new(ModuleRegistry::new(modules).expect("valid modules"));
+        let settings = settings::load(
+            figment_from_toml(toml),
+            db.clone(),
+            Arc::clone(&registry),
+            None,
+        )
+        .await
+        .expect("valid settings");
         AppContext::new(settings, db, registry)
     }
 }

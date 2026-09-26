@@ -269,7 +269,7 @@ mod tests {
         let entry = |key: &str, description| ValueEntry {
             key: key.into(),
             value: Some(json!([1])),
-            source: Source::Database,
+            source: Source::Stored,
             description,
         };
         let listing = Listing {
@@ -280,9 +280,9 @@ mod tests {
 
         assert_eq!(
             render_settings_outcome(&Outcome::Listing(listing)),
-            "telegram.sudo_users_id = [1] (database)\n    Sudo users\n\nPer-entry \
-             overrides:\ntelegram.allowed_users.x = [1] (database)\n\nIgnored stored values \
-             (unset them):\nmodules.disabled: bad"
+            "telegram.sudo_users_id = [1] (stored)\n    Sudo users\n\nPer-entry \
+             overrides:\ntelegram.allowed_users.x = [1] (stored)\n\nIgnored stored values (unset \
+             them):\nmodules.disabled: bad"
         );
     }
 }
