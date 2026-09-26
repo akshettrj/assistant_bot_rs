@@ -9,10 +9,13 @@ license.workspace = true
 [features]
 ## Stores the overrides in a SQL table with SeaORM.
 sea-orm = ["dep:sea-orm", "dep:chrono"]
+## A clap subcommand to view and change the settings from a terminal.
+cli = ["dep:clap"]
 
 [dependencies]
 arc-swap = { workspace = true }
 chrono = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
 figment = { workspace = true }
 futures = { workspace = true }
 sea-orm = { workspace = true, optional = true }

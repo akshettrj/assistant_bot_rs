@@ -51,7 +51,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-botconf = { path = "crates/botconf", features = ["sea-orm"] }
+botconf = { path = "crates/botconf", features = ["cli", "sea-orm"] }
 botconf-telegram = { path = "crates/botconf-telegram" }
 migration = { path = "migration" }
 

@@ -524,6 +524,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "chrono",
+ "clap",
  "figment",
  "futures",
  "sea-orm",

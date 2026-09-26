@@ -6,7 +6,7 @@ use anyhow::Context as _;
 
 use crate::{
     bot,
-    cli::{self, Cli, Command},
+    cli::{Cli, Command},
     config::AssistantConfig,
     context::AppContext,
     db, modules,
@@ -55,7 +55,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 .context("failed to load the runtime settings")?;
 
             let outcome = command::execute(&settings, action.into(), None).await?;
-            println!("{}", cli::render_settings_outcome(&outcome));
+            println!("{}", botconf::cli::render(&outcome));
             if outcome.change().is_some() {
                 eprintln!("note: a running bot applies this after `/config reload` or a restart");
             }

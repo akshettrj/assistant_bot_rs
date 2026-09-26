@@ -59,6 +59,8 @@
 //! # }
 //! ```
 
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod command;
 pub mod keys;
 pub mod kind;

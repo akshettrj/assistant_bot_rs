@@ -12,7 +12,7 @@ use botconf::{
     Choice, Choices, DynamicChoices, FixedChoice, Kind, RuntimeSetting, Schema, Section, View,
     storage::SeaOrmStorage,
 };
-pub use botconf::{SettingsError, Source, keys, kind, parse_value};
+pub use botconf::{SettingsError, Source, command, keys, kind, parse_value};
 use figment::Figment;
 use sea_orm::DatabaseConnection;
 use teloxide::types::UserId;
@@ -29,13 +29,6 @@ use crate::{
 pub type SettingsStore = botconf::SettingsStore<AssistantSchema>;
 pub type Snapshot = botconf::Snapshot<AssistantSchema>;
 pub type Change = botconf::Change<AssistantSchema>;
-
-/// The operations shared by `/config` and the `settings` CLI command.
-pub mod command {
-    pub use botconf::command::{Listing, SettingsCommand, ValueEntry, execute, render_value};
-
-    pub type Outcome = botconf::command::Outcome<super::AssistantSchema>;
-}
 
 /// The assistant's configuration, as the settings store sees it.
 pub struct AssistantSchema {
