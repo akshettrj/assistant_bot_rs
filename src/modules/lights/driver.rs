@@ -117,6 +117,7 @@ pub(crate) mod fake {
                     brightness: 50,
                     temperature: Some(50),
                     color: None,
+                    scene: None,
                     supports_color: true,
                 })),
                 changes: StdMutex::new(Vec::new()),
@@ -150,12 +151,17 @@ pub(crate) mod fake {
 
         fn apply(&self, change: LightChange) -> BoxFuture<'_, LightResult<LightState>> {
             Box::pin(async move {
-                self.changes.lock().unwrap().push(change);
+                self.changes.lock().unwrap().push(change.clone());
                 let mut state = self.state.lock().unwrap();
                 let current = state.as_mut().map_err(|error| error.clone())?;
                 current.on = change.on.unwrap_or(true);
                 if let Some(brightness) = change.brightness {
                     current.brightness = brightness;
+                    if change.scene.is_none()
+                        && let Some(scene) = &current.scene
+                    {
+                        current.scene = Some(scene.with_brightness(brightness));
+                    }
                 }
                 if let Some(temperature) = change.temperature {
                     current.mode = Mode::White;
@@ -166,6 +172,13 @@ pub(crate) mod fake {
                     current.mode = Mode::Colour;
                     current.color = Some(color);
                     current.temperature = None;
+                }
+                if let Some(scene) = change.scene {
+                    current.mode = Mode::Scene;
+                    current.brightness = change.brightness.unwrap_or(scene.brightness());
+                    current.scene = Some(scene);
+                    current.temperature = None;
+                    current.color = None;
                 }
                 Ok(current.clone())
             })

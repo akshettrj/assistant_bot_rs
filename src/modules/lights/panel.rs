@@ -13,6 +13,7 @@ use teloxide::{
 use super::{
     driver::LightResult,
     model::{LightState, NAMED_COLORS},
+    scenes,
     settings::LightsSettings,
 };
 
@@ -30,6 +31,7 @@ const COLOR_BUTTONS: &[(&str, &str)] = &[
     ("purple", "🟣"),
 ];
 const PRESETS_PER_ROW: usize = 3;
+const SCENES_PER_ROW: usize = 3;
 const BRIGHTNESS_STEP: u8 = 20;
 
 /// Splits callback data into the light and the command words.
@@ -93,13 +95,41 @@ pub fn schedules_keyboard(settings: &LightsSettings) -> InlineKeyboardMarkup {
 }
 
 /// The panel's text for a light.
-pub fn text(light: &str, state: &LightResult<LightState>) -> String {
+pub fn text(light: &str, state: &LightResult<LightState>, settings: &LightsSettings) -> String {
     let name = bold(&escape(light));
     match state {
-        Ok(state) if state.on => format!("💡 {name} — {}", escape(&state.to_string())),
-        Ok(state) => format!("⚫ {name} — {}", escape(&state.to_string())),
+        Ok(state) if state.on => format!("💡 {name} — {}", escape(&describe(state, settings))),
+        Ok(state) => format!("⚫ {name} — {}", escape(&describe(state, settings))),
         Err(error) => format!("⚠️ {name} — {}", escape(&error.to_string())),
     }
+}
+
+/// The state in a few words, naming the scene if it is a known one.
+pub fn describe(state: &LightState, settings: &LightsSettings) -> String {
+    let scene = state
+        .scene
+        .as_ref()
+        .and_then(|scene| scenes::identify(scene, settings));
+    state.describe(scene.as_deref())
+}
+
+/// Every scene as a button, and a way back to the panel.
+pub fn scene_picker(light: &str, settings: &LightsSettings) -> InlineKeyboardMarkup {
+    let button = |label: String, words: String| {
+        InlineKeyboardButton::callback(label, format!("{CALLBACK_PREFIX}{light}:{words}"))
+    };
+    let names = scenes::names(settings);
+    let mut rows: Vec<Vec<_>> = names
+        .chunks(SCENES_PER_ROW)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|name| button(format!("🎬 {name}"), format!("scene {name}")))
+                .collect()
+        })
+        .collect();
+    rows.push(vec![button("⬅️ Back".into(), "status".into())]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 /// The panel's buttons for a light.
@@ -123,6 +153,7 @@ pub fn keyboard(
             } else {
                 button("⏻ Turn on", "on")
             },
+            button("🎬 Scenes", "scenes"),
             button("🔄", "status"),
         ],
         vec![
@@ -187,6 +218,7 @@ mod tests {
             brightness: 60,
             temperature: Some(0),
             color: None,
+            scene: None,
             supports_color: true,
         })
     }
@@ -215,6 +247,33 @@ mod tests {
             assert_eq!(light, "bedroom");
             command::parse(words, &settings).unwrap_or_else(|error| panic!("{data}: {error}"));
         }
+    }
+
+    #[test]
+    fn scene_picker_buttons_are_valid_commands() {
+        let settings = settings();
+        let data = callbacks(&scene_picker("bedroom", &settings));
+        assert!(data.contains(&"light:bedroom:scene rainbow".into()));
+        assert_eq!(data.last(), Some(&"light:bedroom:status".into()), "back");
+        for data in data {
+            assert!(data.len() <= 64, "{data}");
+            let (_, words) = parse_callback(&data).unwrap();
+            command::parse(words, &settings).unwrap_or_else(|error| panic!("{data}: {error}"));
+        }
+        assert!(
+            callbacks(&keyboard("bedroom", &state(true), &settings))
+                .contains(&"light:bedroom:scenes".into())
+        );
+    }
+
+    #[test]
+    fn known_scenes_are_named() {
+        let rainbow = scenes::find("rainbow", &settings()).unwrap();
+        let mut playing = state(true).unwrap();
+        playing.mode = Mode::Scene;
+        playing.brightness = 40;
+        playing.scene = Some(rainbow.with_brightness(40));
+        assert_eq!(describe(&playing, &settings()), "on · 40% · rainbow scene");
     }
 
     #[test]
@@ -249,16 +308,19 @@ mod tests {
             callbacks(&keyboard("bedroom", &state, &settings())),
             ["light:bedroom:status"]
         );
-        assert!(text("bedroom", &state).starts_with("⚠️ <b>bedroom</b>"));
+        assert!(text("bedroom", &state, &settings()).starts_with("⚠️ <b>bedroom</b>"));
     }
 
     #[test]
     fn texts_show_the_state() {
         assert_eq!(
-            text("bedroom", &state(true)),
+            text("bedroom", &state(true), &settings()),
             "💡 <b>bedroom</b> — on · 60% · warm white (0)"
         );
-        assert_eq!(text("bedroom", &state(false)), "⚫ <b>bedroom</b> — off");
+        assert_eq!(
+            text("bedroom", &state(false), &settings()),
+            "⚫ <b>bedroom</b> — off"
+        );
     }
 
     #[test]

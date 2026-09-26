@@ -38,7 +38,8 @@ pub enum Command {
     Settings(SettingsAction),
     /// Control the lights, with the same syntax as `/light` (e.g. `light off`,
     /// `light brightness 40`, `light schedules`); `light watch [light]` prints
-    /// the states a light reports until interrupted.
+    /// the states a light reports until interrupted, `light dps [light]` its
+    /// raw data points.
     Light {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

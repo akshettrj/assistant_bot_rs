@@ -66,13 +66,22 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 .context("failed to load the runtime settings")?;
             let ctx = AppContext::new(settings, db, registry);
 
-            if let Some(("watch", rest)) =
-                args.split_first().map(|(verb, rest)| (verb.as_str(), rest))
-            {
-                let light = rest.first().map(String::as_str);
-                return modules::lights::watch_once(&ctx, light)
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error));
+            // Terminal-only commands.
+            let light = args.get(1).map(String::as_str);
+            match args.first().map(String::as_str) {
+                Some("watch") => {
+                    return modules::lights::watch_once(&ctx, light)
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error));
+                }
+                Some("dps") => {
+                    let dps = modules::lights::dps_once(&ctx, light)
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))?;
+                    println!("{dps}");
+                    return Ok(());
+                }
+                _ => {}
             }
 
             match modules::lights::run_once(&ctx, &args.join(" ")).await {

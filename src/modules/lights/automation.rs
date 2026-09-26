@@ -285,7 +285,7 @@ impl Lights {
         light: &str,
         state: &LightResult<LightState>,
     ) {
-        let text = panel::text(light, state);
+        let text = panel::text(light, state, settings);
         let keyboard = panel::keyboard(light, state, settings);
         self.panels.refresh(bot, light, &text, &keyboard).await;
     }

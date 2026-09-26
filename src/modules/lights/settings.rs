@@ -4,7 +4,11 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{model::Preset, schedule::Schedule};
+use super::{
+    model::{LightChange, Preset},
+    scenes::{self, SceneSpec},
+    schedule::Schedule,
+};
 use crate::{config::Secret, settings::keys::RuntimeSetting};
 
 /// Telegram limits callback data to 64 bytes, which hold the light and the
@@ -23,6 +27,10 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         "Named presets, e.g. {\"brightness\": 80, \"temperature\": \"warm\"}",
     ),
     RuntimeSetting::per_entry(
+        "scenes",
+        "Custom scenes; easiest to add with /light scene add",
+    ),
+    RuntimeSetting::per_entry(
         "schedules",
         "Named schedules; easiest to add with /light schedule add",
     ),
@@ -34,6 +42,7 @@ pub struct LightsSettings {
     default: Option<String>,
     devices: BTreeMap<String, DeviceConfig>,
     presets: BTreeMap<String, Preset>,
+    scenes: BTreeMap<String, SceneSpec>,
     schedules: BTreeMap<String, Schedule>,
 }
 
@@ -48,6 +57,32 @@ impl LightsSettings {
 
     pub fn schedules(&self) -> &BTreeMap<String, Schedule> {
         &self.schedules
+    }
+
+    /// The change a preset makes, with its scene looked up.
+    pub fn preset_change(&self, name: &str) -> Option<LightChange> {
+        let preset = self.presets.get(name)?;
+        let mut change = preset.change();
+        if let Some(scene) = &preset.scene {
+            change.scene = scenes::find(scene, self);
+        }
+        Some(change)
+    }
+
+    /// The custom scenes (see [`scenes`] for the built-in ones too).
+    pub fn scenes(&self) -> &BTreeMap<String, SceneSpec> {
+        &self.scenes
+    }
+
+    /// Checks a name for a new custom scene.
+    pub fn validate_new_scene_name(&self, name: &str) -> Result<(), String> {
+        validate_scene_name(name, &self.presets)?;
+        if self.scenes.contains_key(name) {
+            return Err(format!(
+                "there is already a scene `{name}`; remove it first"
+            ));
+        }
+        Ok(())
     }
 
     /// Checks a name for a new schedule.
@@ -106,6 +141,7 @@ struct RawLightsSettings {
     default: Option<String>,
     devices: BTreeMap<String, DeviceConfig>,
     presets: BTreeMap<String, Preset>,
+    scenes: BTreeMap<String, SceneSpec>,
     schedules: BTreeMap<String, Schedule>,
 }
 
@@ -117,6 +153,7 @@ impl TryFrom<RawLightsSettings> for LightsSettings {
             .devices
             .keys()
             .chain(raw.presets.keys())
+            .chain(raw.scenes.keys())
             .chain(raw.schedules.keys())
         {
             validate_name(name)?;
@@ -148,11 +185,30 @@ impl TryFrom<RawLightsSettings> for LightsSettings {
                 .map_err(|error| format!("preset `{name}`: {error}"))?;
         }
 
+        for (name, scene) in &raw.scenes {
+            validate_scene_name(name, &raw.presets)?;
+            scene
+                .scene()
+                .map_err(|error| format!("scene `{name}`: {error}"))?;
+        }
+
+        // A preset may reuse a built-in scene's name: `/light <name>` then
+        // applies the preset, and the scene stays available as `scene <name>`.
+        for (name, preset) in &raw.presets {
+            if let Some(scene) = &preset.scene
+                && !raw.scenes.contains_key(scene)
+                && !scenes::is_builtin(scene)
+            {
+                return Err(format!("preset `{name}`: there is no scene `{scene}`"));
+            }
+        }
+
         // Schedules are checked against the lights and presets.
         let mut settings = Self {
             default: raw.default,
             devices: raw.devices,
             presets: raw.presets,
+            scenes: raw.scenes,
             schedules: BTreeMap::new(),
         };
         for (name, schedule) in &raw.schedules {
@@ -171,9 +227,26 @@ impl From<LightsSettings> for RawLightsSettings {
             default: settings.default,
             devices: settings.devices,
             presets: settings.presets,
+            scenes: settings.scenes,
             schedules: settings.schedules,
         }
     }
+}
+
+/// Custom scene names must be unambiguous in `/light <name>` and `/light
+/// scene <name>`.
+fn validate_scene_name(name: &str, presets: &BTreeMap<String, Preset>) -> Result<(), String> {
+    validate_name(name)?;
+    if scenes::is_builtin(name) {
+        return Err(format!("`{name}` is a built-in scene"));
+    }
+    if presets.contains_key(name) {
+        return Err(format!("`{name}` is both a preset and a scene"));
+    }
+    if matches!(name, "add" | "remove" | "delete") {
+        return Err(format!("`{name}` is reserved"));
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -243,6 +316,15 @@ mod tests {
             json!({ "default": "nope", "devices": { "bedroom": device() } }),
             json!({ "presets": { "reading": {} } }),
             json!({ "presets": { "a-very-long-preset-name-indeed": { "brightness": 5 } } }),
+            json!({ "scenes": { "rainbow": { "steps": ["red", "blue"] } } }),
+            json!({ "scenes": { "add": { "steps": ["red", "blue"] } } }),
+            json!({ "scenes": { "x": { "steps": ["red", "blue"], "transition": "static" } } }),
+            json!({
+                "presets": { "movie": { "brightness": 20 } },
+                "scenes": { "movie": { "steps": ["red", "blue"] } },
+            }),
+            json!({ "presets": { "x": { "scene": "nope" } } }),
+            json!({ "presets": { "x": { "scene": "rainbow", "color": "red" } } }),
             json!({ "typo": 1 }),
         ];
         for case in cases {

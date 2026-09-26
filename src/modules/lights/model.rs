@@ -63,6 +63,12 @@ impl Hsv {
         (channel(r), channel(g), channel(b))
     }
 
+    /// The colour at full brightness, as `#rrggbb`.
+    pub fn hex(self) -> String {
+        let (r, g, b) = self.with_value(100).to_rgb();
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+
     pub fn with_value(self, value: u8) -> Self {
         Self { value, ..self }
     }
@@ -86,7 +92,8 @@ impl fmt::Display for Hsv {
 pub enum Mode {
     White,
     Colour,
-    /// A scene or music mode set from the app.
+    Scene,
+    /// E.g. the music mode, set from the app.
     Other(String),
 }
 
@@ -101,27 +108,39 @@ pub struct LightState {
     pub temperature: Option<u8>,
     /// In colour mode.
     pub color: Option<Hsv>,
+    /// In scene mode.
+    pub scene: Option<Scene>,
     pub supports_color: bool,
+}
+
+impl LightState {
+    /// The state in a few words, naming the scene if it is known.
+    pub fn describe(&self, scene_name: Option<&str>) -> String {
+        if !self.on {
+            return "off".to_string();
+        }
+        let mut text = format!("on · {}%", self.brightness);
+        match (&self.mode, self.temperature, self.color) {
+            (Mode::Colour, _, Some(color)) => text.push_str(&format!(" · {color}")),
+            (Mode::White, Some(temperature), _) => text.push_str(&format!(
+                " · {} white ({temperature})",
+                temperature_name(temperature)
+            )),
+            (Mode::Scene, _, _) => match (scene_name, &self.scene) {
+                (Some(name), _) => text.push_str(&format!(" · {name} scene")),
+                (None, Some(scene)) => text.push_str(&format!(" · scene {}", scene.number)),
+                (None, None) => text.push_str(" · scene"),
+            },
+            (Mode::Other(mode), _, _) => text.push_str(&format!(" · {mode} mode")),
+            _ => {}
+        }
+        text
+    }
 }
 
 impl fmt::Display for LightState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.on {
-            return f.write_str("off");
-        }
-        write!(f, "on · {}%", self.brightness)?;
-        match (&self.mode, self.temperature, self.color) {
-            (Mode::Colour, _, Some(color)) => write!(f, " · {color}"),
-            (Mode::White, Some(temperature), _) => {
-                write!(
-                    f,
-                    " · {} white ({temperature})",
-                    temperature_name(temperature)
-                )
-            }
-            (Mode::Other(mode), _, _) => write!(f, " · {mode} mode"),
-            _ => Ok(()),
-        }
+        f.write_str(&self.describe(None))
     }
 }
 
@@ -136,12 +155,13 @@ fn temperature_name(temperature: u8) -> &'static str {
 /// A change to apply to a light; `None` fields are left as they are.
 ///
 /// Any change except turning off also turns the light on.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LightChange {
     pub on: Option<bool>,
     pub brightness: Option<u8>,
     pub temperature: Option<u8>,
     pub color: Option<Hsv>,
+    pub scene: Option<Scene>,
 }
 
 impl LightChange {
@@ -153,8 +173,169 @@ impl LightChange {
     }
 
     pub fn is_empty(&self) -> bool {
-        *self == Self::default()
+        self == &Self::default()
     }
+}
+
+/// How a scene moves from one step to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transition {
+    /// Stays on the step.
+    Static,
+    /// Switches abruptly.
+    Jump,
+    /// Blends smoothly.
+    #[default]
+    Gradient,
+}
+
+impl std::str::FromStr for Transition {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.to_ascii_lowercase().as_str() {
+            "static" => Ok(Self::Static),
+            "jump" => Ok(Self::Jump),
+            "gradient" | "fade" | "smooth" => Ok(Self::Gradient),
+            _ => Err(format!(
+                "`{input}` is not a transition; use static, jump or gradient"
+            )),
+        }
+    }
+}
+
+/// What one step of a scene shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepLight {
+    /// The colour's value is the step's brightness.
+    Colour(Hsv),
+    White {
+        /// 0–100 %.
+        brightness: u8,
+        /// 0 (warm) – 100 (cool).
+        temperature: u8,
+    },
+}
+
+impl StepLight {
+    pub fn brightness(self) -> u8 {
+        match self {
+            Self::Colour(color) => color.value,
+            Self::White { brightness, .. } => brightness,
+        }
+    }
+
+    fn with_brightness(self, brightness: u8) -> Self {
+        match self {
+            Self::Colour(color) => Self::Colour(color.with_value(brightness)),
+            Self::White { temperature, .. } => Self::White {
+                brightness,
+                temperature,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SceneStep {
+    pub light: StepLight,
+    pub transition: Transition,
+    /// How fast the scene moves to the next step, 0–100.
+    pub switch_speed: u8,
+    /// How fast a gradient blends, 0–100.
+    pub fade_speed: u8,
+}
+
+/// A sequence of colours or whites the light plays by itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scene {
+    /// The device's scene slot.
+    pub number: u8,
+    pub steps: Vec<SceneStep>,
+}
+
+impl Scene {
+    /// The brightness of the brightest step, 1–100 %.
+    pub fn brightness(&self) -> u8 {
+        self.steps
+            .iter()
+            .map(|step| step.light.brightness())
+            .max()
+            .unwrap_or(100)
+            .max(1)
+    }
+
+    /// The same scene, scaled so that its brightest step has `brightness`.
+    pub fn with_brightness(&self, brightness: u8) -> Self {
+        let current = u16::from(self.brightness());
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| {
+                let scaled = (u16::from(step.light.brightness()) * u16::from(brightness)
+                    + current / 2)
+                    / current;
+                SceneStep {
+                    light: step.light.with_brightness(scaled.clamp(1, 100) as u8),
+                    ..*step
+                }
+            })
+            .collect();
+        Self {
+            number: self.number,
+            steps,
+        }
+    }
+
+    /// Whether both scenes play the same colours with the same timing,
+    /// whatever their brightness.
+    pub fn same_pattern(&self, other: &Self) -> bool {
+        self.steps.len() == other.steps.len()
+            && self.steps.iter().zip(&other.steps).all(|(a, b)| {
+                let same_light = match (a.light, b.light) {
+                    (StepLight::Colour(x), StepLight::Colour(y)) => {
+                        (x.hue, x.saturation) == (y.hue, y.saturation)
+                    }
+                    (
+                        StepLight::White { temperature: x, .. },
+                        StepLight::White { temperature: y, .. },
+                    ) => x == y,
+                    _ => false,
+                };
+                same_light
+                    && (a.transition, a.switch_speed, a.fade_speed)
+                        == (b.transition, b.switch_speed, b.fade_speed)
+            })
+    }
+}
+
+/// Parses one step of a custom scene: a colour (`red`, `#ff8800`) or a
+/// white (`white`, `warm`, `neutral`, `cool`, `4000k`).
+pub fn parse_step_light(input: &str, brightness: u8) -> Result<StepLight, String> {
+    let lowered = input.trim().to_ascii_lowercase();
+    if lowered == "white" {
+        return Ok(StepLight::White {
+            brightness,
+            temperature: 50,
+        });
+    }
+    if let Ok(temperature) = parse_temperature(&lowered)
+        && lowered.parse::<u8>().is_err()
+    {
+        return Ok(StepLight::White {
+            brightness,
+            temperature,
+        });
+    }
+    parse_color(input)
+        .map(|color| StepLight::Colour(color.with_value(brightness)))
+        .map_err(|_| {
+            format!(
+                "`{input}` is not a scene step; use a colour (red, #ff8800) or a white (warm, \
+                 cool, 4000k)"
+            )
+        })
 }
 
 /// Parses a brightness: `40`, `40%`, `+10`, `-10`, `max`, `min`.
@@ -286,24 +467,37 @@ pub struct Preset {
     /// A colour name or #rrggbb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorSpec>,
+    /// A scene name (built-in or custom); the brightness then dims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<String>,
 }
 
 impl Preset {
+    /// The change, except for the scene, which must be looked up by name
+    /// (see `LightsSettings::preset_change`).
     pub fn change(&self) -> LightChange {
         LightChange {
             on: Some(true),
             brightness: self.brightness.map(|percent| percent.0.max(1)),
             temperature: self.temperature.as_ref().map(|spec| spec.value),
             color: self.color.as_ref().map(|spec| spec.value),
+            scene: None,
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.temperature.is_some() && self.color.is_some() {
-            return Err("a preset sets either a temperature or a colour, not both".into());
+        let looks = [
+            self.temperature.is_some(),
+            self.color.is_some(),
+            self.scene.is_some(),
+        ];
+        if looks.iter().filter(|set| **set).count() > 1 {
+            return Err("a preset sets one of a temperature, a colour or a scene".into());
         }
-        if self.brightness.is_none() && self.temperature.is_none() && self.color.is_none() {
-            return Err("a preset must set a brightness, a temperature or a colour".into());
+        if self.brightness.is_none() && !looks.contains(&true) {
+            return Err(
+                "a preset must set a brightness, a temperature, a colour or a scene".into(),
+            );
         }
         Ok(())
     }
@@ -459,6 +653,7 @@ mod tests {
             brightness: 60,
             temperature: Some(10),
             color: None,
+            scene: None,
             supports_color: true,
         };
         assert_eq!(state.to_string(), "on · 60% · warm white (10)");
@@ -469,6 +664,74 @@ mod tests {
 
         state.on = false;
         assert_eq!(state.to_string(), "off");
+    }
+
+    fn scene(values: &[u8]) -> Scene {
+        Scene {
+            number: 1,
+            steps: values
+                .iter()
+                .map(|value| SceneStep {
+                    light: StepLight::Colour(hsv(120, 100).with_value(*value)),
+                    transition: Transition::Jump,
+                    switch_speed: 50,
+                    fade_speed: 50,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn scenes_dim_proportionally() {
+        let bright = scene(&[100, 50]);
+        assert_eq!(bright.brightness(), 100);
+
+        let dimmed = bright.with_brightness(40);
+        let levels: Vec<_> = dimmed
+            .steps
+            .iter()
+            .map(|step| step.light.brightness())
+            .collect();
+        assert_eq!(levels, [40, 20]);
+        assert_eq!(dimmed.with_brightness(100), bright, "and back");
+        assert!(scene(&[5]).with_brightness(1).brightness() >= 1);
+    }
+
+    #[test]
+    fn scene_patterns_ignore_brightness() {
+        assert!(scene(&[100, 50]).same_pattern(&scene(&[10, 5])));
+        assert!(!scene(&[100, 50]).same_pattern(&scene(&[100])));
+        let mut other = scene(&[100, 50]);
+        other.steps[1].transition = Transition::Gradient;
+        assert!(!scene(&[100, 50]).same_pattern(&other));
+    }
+
+    #[test]
+    fn parses_scene_steps() {
+        assert_eq!(
+            parse_step_light("warm", 80),
+            Ok(StepLight::White {
+                brightness: 80,
+                temperature: 0
+            })
+        );
+        assert_eq!(
+            parse_step_light("white", 80),
+            Ok(StepLight::White {
+                brightness: 80,
+                temperature: 50
+            })
+        );
+        assert_eq!(
+            parse_step_light("blue", 30),
+            Ok(StepLight::Colour(
+                parse_color("blue").unwrap().with_value(30)
+            ))
+        );
+        assert!(parse_step_light("50", 30).is_err());
+        assert!(parse_step_light("plaid", 30).is_err());
+        assert_eq!("jump".parse(), Ok(Transition::Jump));
+        assert!("wobble".parse::<Transition>().is_err());
     }
 
     #[test]
@@ -484,6 +747,7 @@ mod tests {
                 brightness: Some(80),
                 temperature: Some(0),
                 color: None,
+                scene: None,
             }
         );
         // What was typed is kept.

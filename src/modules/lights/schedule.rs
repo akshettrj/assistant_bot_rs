@@ -68,6 +68,9 @@ impl Schedule {
             | Action::Status
             | Action::List
             | Action::Help
+            | Action::Save(_)
+            | Action::Scenes
+            | Action::ManageScene(_)
             | Action::Schedules
             | Action::Schedule(_) => Err(format!("`{}` doesn't change a light", self.action)),
             action => Ok(action),
@@ -88,9 +91,7 @@ impl Schedule {
                 ..Default::default()
             }),
             Action::Preset(name) => settings
-                .presets()
-                .get(name)
-                .map(|preset| preset.change())
+                .preset_change(name)
                 .filter(|change| change.brightness.is_some()),
             _ => None,
         }
@@ -271,6 +272,7 @@ mod tests {
     fn valid_schedules_load() {
         let settings = settings(json!({
             "bedtime": { "at": "22:00", "action": "preset night" },
+            "movie": { "at": "20:00", "action": "scene rainbow" },
             "wake": { "at": "06:45", "days": "weekdays", "action": "brightness 100", "fade": "15m" },
             "lights-out": { "at": "23:30", "action": "off", "fade": "5m", "enabled": false },
         }))
@@ -293,6 +295,8 @@ mod tests {
             json!({ "x": { "at": "25:00", "action": "off" } }),
             json!({ "x": { "at": "22:00", "action": "dance" } }),
             json!({ "x": { "at": "22:00", "action": "status" } }),
+            json!({ "x": { "at": "22:00", "action": "scenes" } }),
+            json!({ "x": { "at": "22:00", "action": "scene nope" } }),
             json!({ "x": { "at": "22:00", "action": "bedroom off" } }),
             json!({ "x": { "at": "22:00", "action": "off", "light": "nope" } }),
             json!({ "x": { "at": "22:00", "action": "color red", "fade": "5m" } }),

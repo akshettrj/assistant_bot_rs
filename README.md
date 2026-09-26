@@ -137,7 +137,7 @@ settings change.
 `/light` controls Tuya Wi-Fi bulbs (Wipro's smart bulbs are Tuya devices)
 directly over the LAN, with no cloud involved at runtime. `/light` alone shows a
 control panel with buttons for power, brightness, warm/neutral/cool white,
-colours and your presets. Every button is also a text command:
+colours, scenes and your presets. Every button is also a text command:
 
 ```
 /light on | off | toggle
@@ -146,6 +146,7 @@ colours and your presets. Every button is also a text command:
 /light color red | #ff8800
 /light reading                 apply the `reading` preset
 /light desk off                with several lights, name one first
+/light rainbow                 play a scene (see below)
 /light schedules               see below
 ```
 
@@ -164,16 +165,57 @@ Setup, once per bulb:
    router), or open UDP 6666, 6667 and 7000 so it can be discovered.
 4. Grant access: `/config add telegram.allowed_users.lights <user id>`.
 
-Presets are runtime settings:
+Presets are runtime settings. The easiest way to make one is to set the light
+up as you like, from `/light` or the app, and save it:
 
 ```
+/light save cosy                   then /light cosy brings it back
 /config set modules.lights.presets.movie {"brightness": 20, "color": "purple"}
 ```
+
+A preset sets a brightness and one of a `temperature`, a `color` or a `scene`
+(`{"brightness": 30, "scene": "rainbow"}`). `save` records whatever the light
+shows:
+- a known scene: saved by name;
+- a scene set from the app: its colour if it has a single step, otherwise a
+  copy saved as the custom scene `<name>-scene`.
+
+Saving to an existing name replaces that preset, even one from the config file.
+A preset may be named after a built-in scene (e.g. `night`). `/light night` then
+applies the preset, and `/light scene night` still plays the scene.
 
 **Live panels.** Panels posted in the last 48 hours update themselves when the
 light changes, whether from Telegram, a schedule, or the Smart Life app, using
 the status the bulb pushes. `assistant_bot_rs light watch` prints those pushes
 in a terminal.
+
+#### Scenes
+
+Scenes are colour or white sequences the bulb plays by itself. The standard
+Tuya ones are built in: `night`, `read`, `meeting`, `leisure`, `soft`,
+`rainbow`, `shine` and `beautiful`.
+
+```
+/light scene rainbow                   or just /light rainbow
+/light scenes                          a picker (also the 🎬 Scenes button)
+/light scene add party jump red green blue speed 80
+/light scene add calm gradient warm cool speed 20
+/light scene add candle #ff8a00        one step: a static scene
+/light scene remove party
+```
+
+- Steps are colours (`red`, `#ff8800`) or whites (`warm`, `neutral`, `cool`,
+  `4000k`), up to 8 of them. The transition is `static` (a single step),
+  `jump`, or `gradient` (the default), and the speed is 1–100.
+- While a scene plays, `/light brightness …` dims the whole scene instead of
+  leaving it, so fades work on scenes too. The panel names the scene when it
+  recognizes it, even dimmed, and shows e.g. `scene 7` for ones set from the
+  app.
+- Custom scenes are runtime settings (`modules.lights.scenes.<name>`); a
+  scene's brightness can be set there (see `config.example.toml`). Schedules
+  can play scenes too (`/light schedule add movie 20:00 scene rainbow`).
+- Scenes need a v2 Tuya light (the common kind). `assistant_bot_rs light dps`
+  shows a light's raw data points, to check.
 
 #### Schedules
 

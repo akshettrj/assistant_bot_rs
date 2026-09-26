@@ -10,6 +10,7 @@
 //! | 22      | 3       | brightness: 10–1000 (v2), 25–255 (v1)         |
 //! | 23      | 4       | temperature: 0–1000 (v2), 0–255 (v1)          |
 //! | 24      | 5       | colour: `hhhhssssvvvv` (v2), `rrggbb0hhhssvv` |
+//! | 25      | –       | scene: slot, then 13-byte steps (see [`encode_scene`]) |
 //!
 //! The encoding is pure ([`encode`], [`decode`]) so that it can be tested
 //! without a device.
@@ -26,7 +27,7 @@ use tokio::sync::Mutex;
 
 use super::{
     driver::{LightDriver, LightError, LightResult},
-    model::{Hsv, LightChange, LightState, Mode},
+    model::{Hsv, LightChange, LightState, Mode, Scene, SceneStep, StepLight, Transition},
     settings::{DeviceConfig, Layout},
 };
 
@@ -40,6 +41,8 @@ pub struct Schema {
     brightness: &'static str,
     temperature: &'static str,
     color: &'static str,
+    /// Only the v2 layout has scenes.
+    scene: Option<&'static str>,
     brightness_range: (u16, u16),
     temperature_max: u16,
     color_encoding: ColorEncoding,
@@ -59,6 +62,7 @@ pub const V2: Schema = Schema {
     brightness: "22",
     temperature: "23",
     color: "24",
+    scene: Some("25"),
     brightness_range: (10, 1000),
     temperature_max: 1000,
     color_encoding: ColorEncoding::HsvHex,
@@ -70,6 +74,7 @@ pub const V1: Schema = Schema {
     brightness: "3",
     temperature: "4",
     color: "5",
+    scene: None,
     brightness_range: (25, 255),
     temperature_max: 255,
     color_encoding: ColorEncoding::RgbHsvHex,
@@ -165,6 +170,7 @@ pub fn decode(schema: &Schema, dps: &Map<String, Value>) -> LightResult<LightSta
         .ok_or_else(|| missing(schema.power))?;
     let mode = match dps.get(schema.mode).and_then(Value::as_str) {
         Some("colour") => Mode::Colour,
+        Some("scene") => Mode::Scene,
         Some("white") | None => Mode::White,
         Some(other) => Mode::Other(other.to_string()),
     };
@@ -173,8 +179,15 @@ pub fn decode(schema: &Schema, dps: &Map<String, Value>) -> LightResult<LightSta
         .and_then(Value::as_str)
         .and_then(|raw| schema.decode_color(raw));
 
-    let brightness = match (&mode, color) {
-        (Mode::Colour, Some(color)) => color.value.max(1),
+    let scene = schema
+        .scene
+        .and_then(|dp| dps.get(dp))
+        .and_then(Value::as_str)
+        .and_then(decode_scene);
+
+    let brightness = match (&mode, color, &scene) {
+        (Mode::Colour, Some(color), _) => color.value.max(1),
+        (Mode::Scene, _, Some(scene)) => scene.brightness(),
         _ => dps
             .get(schema.brightness)
             .and_then(Value::as_u64)
@@ -191,6 +204,7 @@ pub fn decode(schema: &Schema, dps: &Map<String, Value>) -> LightResult<LightSta
         brightness,
         temperature: (mode == Mode::White).then_some(temperature).flatten(),
         color: (mode == Mode::Colour).then_some(color).flatten(),
+        scene: (mode == Mode::Scene).then_some(scene).flatten(),
         supports_color: dps.contains_key(schema.color),
         mode,
     })
@@ -208,7 +222,17 @@ pub fn encode(
         return Ok(dps);
     }
 
-    if let Some(color) = change.color {
+    if let Some(scene) = &change.scene {
+        let dp = schema
+            .scene
+            .ok_or_else(|| LightError::Unsupported("this light has no scenes".into()))?;
+        let scene = match change.brightness {
+            Some(brightness) => scene.with_brightness(brightness),
+            None => scene.clone(),
+        };
+        dps.insert(schema.mode.into(), "scene".into());
+        dps.insert(dp.into(), encode_scene(&scene).into());
+    } else if let Some(color) = change.color {
         if !current.supports_color {
             return Err(LightError::Unsupported("this light has no colours".into()));
         }
@@ -232,17 +256,24 @@ pub fn encode(
             );
         }
     } else if let Some(brightness) = change.brightness {
-        match (&current.mode, current.color) {
+        match (&current.mode, current.color, &current.scene, schema.scene) {
             // In colour mode, the brightness is the colour's value.
-            (Mode::Colour, Some(color)) => {
+            (Mode::Colour, Some(color), _, _) => {
                 dps.insert(
                     schema.color.into(),
                     schema.encode_color(color.with_value(brightness)).into(),
                 );
             }
-            (mode, _) => {
-                // Scenes ignore the brightness: go back to white.
-                if matches!(mode, Mode::Other(_)) {
+            // In scene mode, the scene is dimmed as a whole.
+            (Mode::Scene, _, Some(scene), Some(dp)) => {
+                dps.insert(
+                    dp.into(),
+                    encode_scene(&scene.with_brightness(brightness)).into(),
+                );
+            }
+            (mode, ..) => {
+                // Other modes ignore the brightness: go back to white.
+                if matches!(mode, Mode::Scene | Mode::Other(_)) {
                     dps.insert(schema.mode.into(), "white".into());
                 }
                 dps.insert(
@@ -254,6 +285,128 @@ pub fn encode(
     }
 
     Ok(dps)
+}
+
+/// The standard scenes of Tuya v2 colour lights, as the apps send them
+/// (from localtuya's `SCENE_LIST_RGBW_1000`).
+const BUILTIN_SCENES: &[(&str, &str)] = &[
+    ("night", "000e0d0000000000000000c80000"),
+    ("read", "010e0d0000000000000003e801f4"),
+    ("meeting", "020e0d0000000000000003e803e8"),
+    ("leisure", "030e0d0000000000000001f401f4"),
+    ("soft", "04464602007803e803e800000000464602007803e8000a00000000"),
+    (
+        "rainbow",
+        "05464601000003e803e800000000464601007803e803e80000000046460100f003e803e800000000",
+    ),
+    (
+        "shine",
+        "06464601000003e803e800000000464601007803e803e80000000046460100f003e803e800000000",
+    ),
+    (
+        "beautiful",
+        "07464602000003e803e800000000464602007803e803e80000000046460200f003e803e8000000004646\
+         02003d03e803e80000000046460200ae03e803e800000000464602011303e803e800000000",
+    ),
+];
+
+/// The built-in scenes, by name.
+pub fn builtin_scenes() -> impl Iterator<Item = (&'static str, Scene)> {
+    BUILTIN_SCENES.iter().map(|(name, data)| {
+        let scene = decode_scene(data).expect("built-in scenes are valid");
+        (*name, scene)
+    })
+}
+
+const STEP_HEX_LEN: usize = 26;
+
+/// Encodes a scene: its slot (1 byte), then per step: switch speed, fade
+/// speed, transition (1 byte each: 0 static, 1 jump, 2 gradient), then hue,
+/// saturation, value, white brightness and white temperature (2 bytes
+/// each; saturation, value, brightness and temperature in 0–1000). Colour
+/// steps leave the white fields at 0, white steps the colour ones.
+pub fn encode_scene(scene: &Scene) -> String {
+    let mut data = format!("{:02x}", scene.number);
+    for step in &scene.steps {
+        let transition = match step.transition {
+            Transition::Static => 0,
+            Transition::Jump => 1,
+            Transition::Gradient => 2,
+        };
+        let (hue, saturation, value, brightness, temperature) = match step.light {
+            StepLight::Colour(color) => (
+                color.hue,
+                scale(color.saturation, (0, 1000)),
+                scale(color.value, (0, 1000)),
+                0,
+                0,
+            ),
+            StepLight::White {
+                brightness,
+                temperature,
+            } => (
+                0,
+                0,
+                0,
+                scale(brightness, (0, 1000)),
+                scale(temperature, (0, 1000)),
+            ),
+        };
+        data.push_str(&format!(
+            "{:02x}{:02x}{transition:02x}{hue:04x}{saturation:04x}{value:04x}{brightness:\
+             04x}{temperature:04x}",
+            step.switch_speed.min(100),
+            step.fade_speed.min(100),
+        ));
+    }
+    data
+}
+
+/// Decodes [`encode_scene`]'s format.
+pub fn decode_scene(data: &str) -> Option<Scene> {
+    let hex = |range: std::ops::Range<usize>| {
+        data.get(range)
+            .and_then(|digits| u16::from_str_radix(digits, 16).ok())
+    };
+    let steps = data.get(2..)?;
+    if steps.is_empty() || steps.len() % STEP_HEX_LEN != 0 {
+        return None;
+    }
+
+    let number = hex(0..2)? as u8;
+    let steps = (0..steps.len() / STEP_HEX_LEN)
+        .map(|index| {
+            let at = 2 + index * STEP_HEX_LEN;
+            let field = |offset: usize, len: usize| hex(at + offset..at + offset + len);
+            let transition = match field(4, 2)? {
+                0 => Transition::Static,
+                1 => Transition::Jump,
+                _ => Transition::Gradient,
+            };
+            let (hue, saturation, value) = (field(6, 4)?, field(10, 4)?, field(14, 4)?);
+            let (brightness, temperature) = (field(18, 4)?, field(22, 4)?);
+            let light = if (hue, saturation, value) == (0, 0, 0) && brightness > 0 {
+                StepLight::White {
+                    brightness: unscale(brightness.into(), (0, 1000)).max(1),
+                    temperature: unscale(temperature.into(), (0, 1000)),
+                }
+            } else {
+                StepLight::Colour(Hsv {
+                    hue: hue % 360,
+                    saturation: unscale(saturation.into(), (0, 1000)),
+                    value: unscale(value.into(), (0, 1000)).max(1),
+                })
+            };
+            Some(SceneStep {
+                light,
+                transition,
+                switch_speed: field(0, 2)? as u8,
+                fade_speed: field(2, 2)? as u8,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(Scene { number, steps })
 }
 
 /// Extracts the DPs from a device message: `{"dps": {...}}` (queries,
@@ -326,6 +479,12 @@ impl TuyaLight {
             schema: Arc::new(StdMutex::new(Schema::from_layout(config.layout))),
             dps: Arc::new(StdMutex::new(Map::new())),
         }
+    }
+
+    /// The raw data points, for diagnostics (`assistant_bot_rs light dps`).
+    pub async fn raw_dps(&self) -> LightResult<Map<String, Value>> {
+        let _request = self.requests.lock().await;
+        Ok(self.read().await?.1)
     }
 
     /// Queries the DPs, refreshing the cache, and returns them with the
@@ -433,6 +592,7 @@ mod tests {
             brightness,
             temperature: Some(temperature),
             color: None,
+            scene: None,
             supports_color: true,
         }
     }
@@ -602,6 +762,101 @@ mod tests {
         };
         assert!(matches!(
             encode(&V2, &change, &current),
+            Err(LightError::Unsupported(_))
+        ));
+    }
+
+    /// The scene the bedroom bulb was playing when this was written.
+    const REAL_SCENE: &str = "07000000002803e8000a00000000";
+
+    #[test]
+    fn decodes_a_real_scene() {
+        let scene = decode_scene(REAL_SCENE).unwrap();
+        assert_eq!(scene.number, 7);
+        assert_eq!(
+            scene.steps,
+            [SceneStep {
+                light: StepLight::Colour(Hsv {
+                    hue: 40,
+                    saturation: 100,
+                    value: 1
+                }),
+                transition: Transition::Static,
+                switch_speed: 0,
+                fade_speed: 0,
+            }]
+        );
+        assert_eq!(encode_scene(&scene), REAL_SCENE);
+    }
+
+    #[test]
+    fn builtin_scenes_round_trip() {
+        for ((name, data), (_, scene)) in BUILTIN_SCENES.iter().zip(builtin_scenes()) {
+            assert_eq!(encode_scene(&scene), *data, "{name}");
+        }
+        let night = builtin_scenes()
+            .find(|(name, _)| *name == "night")
+            .unwrap()
+            .1;
+        assert_eq!(
+            night.steps[0].light,
+            StepLight::White {
+                brightness: 20,
+                temperature: 0
+            }
+        );
+        assert_eq!(builtin_scenes().count(), 8);
+    }
+
+    #[test]
+    fn rejects_malformed_scenes() {
+        for invalid in ["", "07", "07zz", "0700000000", &format!("{REAL_SCENE}00")] {
+            assert_eq!(decode_scene(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn decodes_scene_mode() {
+        let state = decode(
+            &V2,
+            &dps(json!({"20": true, "21": "scene", "22": 20, "25": REAL_SCENE})),
+        )
+        .unwrap();
+        assert_eq!(state.mode, Mode::Scene);
+        assert_eq!(state.brightness, 1, "the scene's, not DP 22's");
+        assert_eq!(state.scene.unwrap().number, 7);
+    }
+
+    #[test]
+    fn encodes_scenes_and_dims_them() {
+        let rainbow = builtin_scenes()
+            .find(|(name, _)| *name == "rainbow")
+            .unwrap()
+            .1;
+        let change = LightChange {
+            scene: Some(rainbow.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            encode(&V2, &change, &white(50, 50)).unwrap(),
+            dps(json!({"20": true, "21": "scene", "25": encode_scene(&rainbow)}))
+        );
+
+        let mut playing = white(100, 50);
+        playing.mode = Mode::Scene;
+        playing.scene = Some(rainbow.clone());
+        let dim = LightChange {
+            brightness: Some(50),
+            ..Default::default()
+        };
+        let update = encode(&V2, &dim, &playing).unwrap();
+        assert_eq!(update.get("21"), None, "stays in scene mode");
+        let dimmed = decode_scene(update["25"].as_str().unwrap()).unwrap();
+        assert_eq!(dimmed.brightness(), 50);
+        assert!(dimmed.same_pattern(&rainbow));
+
+        assert!(matches!(
+            encode(&V1, &change, &white(50, 50)),
             Err(LightError::Unsupported(_))
         ));
     }

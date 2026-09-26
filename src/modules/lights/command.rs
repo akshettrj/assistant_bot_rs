@@ -3,6 +3,7 @@
 
 use super::{
     model::{Brightness, Hsv, parse_brightness, parse_color, parse_temperature},
+    scenes::{self, SceneCommand},
     schedule::{self, ScheduleCommand},
     settings::LightsSettings,
 };
@@ -14,6 +15,10 @@ pub const USAGE: &str = "\
 /light temp warm | neutral | cool | 0–100 | 4000k
 /light color red | #ff8800
 /light preset <name> (or just /light <name>)
+/light save <name> — save the current look as a preset
+/light scene rainbow | night | … (or just /light <scene>), /light scenes to pick one
+/light scene add <name> [static|jump|gradient] <colours…> [speed 1–100]
+/light scene remove <name>
 /light status | list | help
 /light schedules — list, pause and run them
 /light schedule add <name> <HH:MM> [daily|weekdays|mon,wed…] <action> [fade 15m]
@@ -34,6 +39,12 @@ pub enum Action {
     Temperature(u8),
     Color(Hsv),
     Preset(String),
+    /// Saves the light's current look as a preset.
+    Save(String),
+    Scene(String),
+    /// The scene picker.
+    Scenes,
+    ManageScene(SceneCommand),
     Schedules,
     Schedule(ScheduleCommand),
 }
@@ -71,6 +82,22 @@ pub fn parse(args: &str, settings: &LightsSettings) -> Result<Request, String> {
         }
         Some("status" | "state") => Action::Status,
         Some("list" | "lights") => Action::List,
+        Some("save") => match rest.as_slice() {
+            [name] => Action::Save(name.to_ascii_lowercase()),
+            _ => return Err("use `save <name>` to save the current look as a preset".into()),
+        },
+        Some("scenes" | "effects") => Action::Scenes,
+        Some("scene" | "effect") => match rest.first().copied() {
+            Some("add" | "remove" | "delete") => {
+                Action::ManageScene(scenes::parse_command(&rest, settings)?)
+            }
+            Some(name) if rest.len() == 1 => {
+                let name = name.to_ascii_lowercase();
+                known_scene(&name, settings)?;
+                Action::Scene(name)
+            }
+            _ => return Err("use `scene <name>`; `scenes` lists them".into()),
+        },
         Some("schedules" | "timers") => Action::Schedules,
         Some("schedule" | "timer") => {
             Action::Schedule(schedule::parse_command(&rest, light.as_deref(), settings)?)
@@ -97,6 +124,9 @@ pub fn parse(args: &str, settings: &LightsSettings) -> Result<Request, String> {
         Some(name) if argument.is_empty() && settings.presets().contains_key(name) => {
             Action::Preset(name.to_string())
         }
+        Some(name) if argument.is_empty() && scenes::find(name, settings).is_some() => {
+            Action::Scene(name.to_string())
+        }
         Some(other) => return Err(format!("unknown command `{other}`")),
     };
 
@@ -113,11 +143,23 @@ fn is_simple(verb: &str) -> bool {
             | "lights"
             | "schedules"
             | "timers"
+            | "scenes"
+            | "effects"
             | "help"
             | "on"
             | "off"
             | "toggle"
     )
+}
+
+fn known_scene(name: &str, settings: &LightsSettings) -> Result<(), String> {
+    if scenes::find(name, settings).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "there is no scene `{name}`; known: {}",
+        scenes::names(settings).join(", ")
+    ))
 }
 
 fn known_preset(name: &str, settings: &LightsSettings) -> Result<(), String> {
@@ -177,6 +219,23 @@ mod tests {
         );
         assert_eq!(action("preset reading"), Action::Preset("reading".into()));
         assert_eq!(action("reading"), Action::Preset("reading".into()));
+        assert_eq!(action("save Cosy"), Action::Save("cosy".into()));
+        assert!(parse("save", &settings()).is_err());
+        assert!(parse("save a b", &settings()).is_err());
+    }
+
+    #[test]
+    fn parses_scene_actions() {
+        assert_eq!(action("scene rainbow"), Action::Scene("rainbow".into()));
+        assert_eq!(action("Rainbow"), Action::Scene("rainbow".into()));
+        assert_eq!(action("scenes"), Action::Scenes);
+        assert!(matches!(
+            action("scene add party jump red blue"),
+            Action::ManageScene(scenes::SceneCommand::Add { .. })
+        ));
+        for invalid in ["scene", "scene nope", "scene rainbow now", "scenes all"] {
+            assert!(parse(invalid, &settings()).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]

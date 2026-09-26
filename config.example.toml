@@ -78,6 +78,24 @@ version = "3.5"
 reading = { brightness = 90, temperature = "neutral" }
 night = { brightness = 5, temperature = "warm" }
 relax = { brightness = 40, color = "orange" }
+movie = { brightness = 30, scene = "rainbow" }
+
+# Runtime. Custom scenes, next to the built-in ones (night, read, meeting,
+# leisure, soft, rainbow, shine, beautiful); easiest to add with
+# `/light scene add <name> [static|jump|gradient] <colours…> [speed 1–100]`.
+[modules.lights.scenes.party]
+# Colours (red, #ff8800) or whites (warm, neutral, cool, 4000k); up to 8.
+steps = ["red", "green", "blue", "purple"]
+# static (a single step), jump, or gradient (the default).
+transition = "jump"
+# 1–100 (default 50).
+speed = 80
+
+[modules.lights.scenes.candle]
+steps = ["#ff8a00"]
+transition = "static"
+# 1–100 % (default 100).
+brightness = 20
 
 # Runtime. Schedules run /light actions at a time of day; easiest to manage
 # with `/light schedule add|pause|resume|run|remove` and `/light schedules`.

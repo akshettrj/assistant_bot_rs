@@ -8,6 +8,7 @@
 //! - [`tuya`] — the Tuya implementation;
 //! - [`panel`] — the control panel and schedules messages;
 //! - [`live`] — keeping posted panels up to date;
+//! - [`scenes`] — built-in and custom scenes;
 //! - [`schedule`] — schedules and their grammar;
 //! - [`automation`] — the background work: schedules, fades and watchers;
 //! - [`settings`] — `[modules.lights]`.
@@ -18,6 +19,7 @@ pub mod driver;
 pub mod live;
 pub mod model;
 pub mod panel;
+pub mod scenes;
 pub mod schedule;
 pub mod settings;
 pub mod tuya;
@@ -45,6 +47,7 @@ use self::{
     driver::{DriverFactory, DriverPool, LightDriver, LightError, LightResult},
     live::Panels,
     model::{Brightness, LightChange, LightState},
+    scenes::SceneCommand,
     schedule::ScheduleCommand,
     settings::{DeviceConfig, LightsSettings, RUNTIME_SETTINGS},
     tuya::TuyaLight,
@@ -99,7 +102,7 @@ impl Module for LightsModule {
         ModuleInfo {
             id: ID,
             name: "Lights",
-            description: "Smart lights: power, brightness, white, colours and schedules",
+            description: "Smart lights: power, brightness, white, colours, scenes and schedules",
             access: AccessPolicy::Restricted,
         }
     }
@@ -186,10 +189,10 @@ impl Reply {
     fn panel(light: &str, state: LightResult<LightState>, settings: &LightsSettings) -> Self {
         Self {
             toast: match &state {
-                Ok(state) => format!("{light}: {state}"),
+                Ok(state) => format!("{light}: {}", panel::describe(state, settings)),
                 Err(error) => error.to_string(),
             },
-            text: panel::text(light, &state),
+            text: panel::text(light, &state, settings),
             keyboard: Some(panel::keyboard(light, &state, settings)),
             failed: state.is_err(),
             panel_of: Some(light.to_string()),
@@ -236,6 +239,9 @@ impl Lights {
             Action::Schedule(command) => {
                 return self.manage_schedule(origin, &settings, command).await;
             }
+            Action::ManageScene(command) => {
+                return self.manage_scene(origin, command).await;
+            }
             action => action,
         };
 
@@ -252,9 +258,25 @@ impl Lights {
             });
         };
 
+        if let Action::Save(preset) = &action {
+            return self
+                .save_preset(origin, &settings, preset, name, config)
+                .await;
+        }
+
         let state = self.execute(name, config, &settings, &action).await;
         if let Err(error) = &state {
             tracing::warn!(light = name, %error, "light request failed");
+        }
+
+        // The picker replaces the panel until a scene is picked.
+        if action == Action::Scenes && state.is_ok() {
+            return Reply {
+                keyboard: Some(panel::scene_picker(name, &settings)),
+                text: format!("{}\n\nPick a scene:", panel::text(name, &state, &settings)),
+                panel_of: None,
+                ..Reply::panel(name, state, &settings)
+            };
         }
         if let Some(bot) = origin.bot {
             self.refresh_panels(bot, &settings, name, &state).await;
@@ -270,8 +292,10 @@ impl Lights {
         settings: &LightsSettings,
         action: &Action,
     ) -> LightResult<LightState> {
-        if !matches!(action, Action::Panel | Action::Status)
-            && let Some(fade) = self.fades().remove(name)
+        if !matches!(
+            action,
+            Action::Panel | Action::Status | Action::Scenes | Action::Save(_)
+        ) && let Some(fade) = self.fades().remove(name)
         {
             tracing::info!(light = name, "fade cancelled by a command");
             fade.abort();
@@ -279,6 +303,81 @@ impl Lights {
 
         let driver = self.pool.get(name, config).await;
         apply(driver.as_ref(), settings, action).await
+    }
+
+    /// Saves the light's current look as the preset `preset` (replacing it).
+    async fn save_preset(
+        &self,
+        origin: &Origin<'_>,
+        settings: &LightsSettings,
+        preset: &str,
+        light: &str,
+        config: &DeviceConfig,
+    ) -> Reply {
+        let driver = self.pool.get(light, config).await;
+        let state = match driver.state().await {
+            Ok(state) => state,
+            Err(error) => return Reply::error(error.to_string()),
+        };
+        let captured = match capture(&state, settings, preset) {
+            Ok(captured) => captured,
+            Err(error) => return Reply::error(error),
+        };
+
+        let store = &origin.ctx.settings;
+        let registry = &origin.ctx.modules;
+        // The scene first: the preset refers to it.
+        if let Some((scene, spec)) = &captured.scene {
+            let key = format!("modules.{ID}.scenes.{scene}");
+            if let Err(error) = store.set(&key, spec.clone(), origin.user, registry).await {
+                return Reply::error(error.to_string());
+            }
+        }
+        let key = format!("modules.{ID}.presets.{preset}");
+        if let Err(error) = store
+            .set(&key, captured.preset.clone(), origin.user, registry)
+            .await
+        {
+            return Reply::error(error.to_string());
+        }
+
+        let mut text = format!(
+            "✅ Saved {preset}: {}. Use /light {preset}",
+            panel::describe(&state, &current_settings(origin.ctx))
+        );
+        if let Some((scene, _)) = &captured.scene {
+            text.push_str(&format!(" (its scene was saved as {scene})"));
+        }
+        if !state.on {
+            text.push_str("\nThe light is off: this is the look it had when last on.");
+        }
+        Reply::message(text)
+    }
+
+    async fn manage_scene(&self, origin: &Origin<'_>, command: SceneCommand) -> Reply {
+        let store = &origin.ctx.settings;
+        let registry = &origin.ctx.modules;
+        let key = |name: &str| format!("modules.{ID}.scenes.{name}");
+
+        match command {
+            SceneCommand::Add { name, spec } => {
+                let value = serde_json::to_value(&spec).expect("scenes serialize");
+                match store.set(&key(&name), value, origin.user, registry).await {
+                    Ok(_) => Reply::message(format!(
+                        "✅ Added the {name} scene: {}. Try /light {name}",
+                        spec.describe()
+                    )),
+                    Err(error) => Reply::error(error.to_string()),
+                }
+            }
+            SceneCommand::Remove(name) => match store.unset(&key(&name), registry).await {
+                Ok(Some(_)) => Reply::message(format!("✅ Removed the {name} scene")),
+                Ok(None) => Reply::error(format!(
+                    "`{name}` is defined in the config file: remove it there"
+                )),
+                Err(error) => Reply::error(error.to_string()),
+            },
+        }
     }
 
     async fn manage_schedule(
@@ -339,46 +438,134 @@ impl Lights {
     }
 }
 
+/// A light's look as settings: a preset, and the custom scene it needs, if
+/// any.
+#[derive(Debug, PartialEq)]
+struct Captured {
+    preset: serde_json::Value,
+    scene: Option<(String, serde_json::Value)>,
+}
+
+/// Describes `state` as a preset called `name`.
+///
+/// Known scenes are referred to by name. A scene set from the app becomes the
+/// equivalent colour or white if it has a single step, or a custom scene
+/// `<name>-scene` otherwise.
+fn capture(state: &LightState, settings: &LightsSettings, name: &str) -> Result<Captured, String> {
+    use serde_json::json;
+
+    use self::model::{Mode, StepLight, Transition};
+
+    let brightness = state.brightness;
+    let look = |light: StepLight| match light {
+        StepLight::Colour(color) => {
+            json!({ "brightness": color.value.max(1), "color": color.hex() })
+        }
+        StepLight::White {
+            brightness,
+            temperature,
+        } => json!({ "brightness": brightness.max(1), "temperature": temperature }),
+    };
+
+    let preset = match (&state.mode, state.color, &state.scene) {
+        (Mode::White, _, _) => json!({
+            "brightness": brightness,
+            "temperature": state.temperature.unwrap_or(50),
+        }),
+        (Mode::Colour, Some(color), _) => json!({ "brightness": brightness, "color": color.hex() }),
+        (Mode::Scene, _, Some(scene)) => {
+            if let Some(known) = scenes::identify(scene, settings) {
+                json!({ "brightness": brightness, "scene": known })
+            } else if let [step] = scene.steps.as_slice() {
+                look(step.light)
+            } else {
+                let scene_name = format!("{name}-scene");
+                let steps: Vec<_> = scene
+                    .steps
+                    .iter()
+                    .map(|step| match step.light {
+                        StepLight::Colour(color) => color.hex(),
+                        // Back to the Kelvin scale that `parse_temperature` reads.
+                        StepLight::White { temperature, .. } => {
+                            format!("{}k", 2700 + u32::from(temperature) * 38)
+                        }
+                    })
+                    .collect();
+                let first = scene.steps[0];
+                let transition = match first.transition {
+                    Transition::Static => Transition::Gradient,
+                    moving => moving,
+                };
+                let spec = json!({
+                    "steps": steps,
+                    "transition": transition,
+                    "speed": first.switch_speed.clamp(1, 100),
+                });
+                return Ok(Captured {
+                    preset: json!({ "brightness": brightness, "scene": scene_name }),
+                    scene: Some((scene_name, spec)),
+                });
+            }
+        }
+        (Mode::Other(mode), _, _) => {
+            return Err(format!("the {mode} mode can't be saved as a preset"));
+        }
+        _ => return Err("couldn't read the light's current look".into()),
+    };
+    Ok(Captured {
+        preset,
+        scene: None,
+    })
+}
+
 /// Resolves an action to a change and applies it.
 async fn apply(
     driver: &dyn LightDriver,
     settings: &LightsSettings,
     action: &Action,
 ) -> LightResult<LightState> {
-    let change = match action {
-        Action::On => LightChange::power(true),
-        Action::Off => LightChange::power(false),
-        Action::Toggle => LightChange::power(!driver.state().await?.on),
-        Action::Brightness(brightness) => {
-            let current = match brightness {
-                Brightness::Absolute(_) => 0,
-                Brightness::Relative(_) => driver.state().await?.brightness,
-            };
-            LightChange {
-                brightness: Some(brightness.resolve(current)),
-                ..Default::default()
+    let change =
+        match action {
+            Action::On => LightChange::power(true),
+            Action::Off => LightChange::power(false),
+            Action::Toggle => LightChange::power(!driver.state().await?.on),
+            Action::Brightness(brightness) => {
+                let current = match brightness {
+                    Brightness::Absolute(_) => 0,
+                    Brightness::Relative(_) => driver.state().await?.brightness,
+                };
+                LightChange {
+                    brightness: Some(brightness.resolve(current)),
+                    ..Default::default()
+                }
             }
-        }
-        Action::Temperature(temperature) => LightChange {
-            temperature: Some(*temperature),
-            ..Default::default()
-        },
-        Action::Color(color) => LightChange {
-            color: Some(*color),
-            ..Default::default()
-        },
-        Action::Preset(name) => settings
-            .presets()
-            .get(name)
-            .ok_or_else(|| LightError::Unsupported(format!("there is no preset `{name}`")))?
-            .change(),
-        Action::Panel
-        | Action::Status
-        | Action::List
-        | Action::Help
-        | Action::Schedules
-        | Action::Schedule(_) => return driver.state().await,
-    };
+            Action::Temperature(temperature) => LightChange {
+                temperature: Some(*temperature),
+                ..Default::default()
+            },
+            Action::Color(color) => LightChange {
+                color: Some(*color),
+                ..Default::default()
+            },
+            Action::Preset(name) => settings
+                .preset_change(name)
+                .ok_or_else(|| LightError::Unsupported(format!("there is no preset `{name}`")))?,
+            Action::Scene(name) => LightChange {
+                scene: Some(scenes::find(name, settings).ok_or_else(|| {
+                    LightError::Unsupported(format!("there is no scene `{name}`"))
+                })?),
+                ..Default::default()
+            },
+            Action::Panel
+            | Action::Status
+            | Action::List
+            | Action::Help
+            | Action::Save(_)
+            | Action::Scenes
+            | Action::ManageScene(_)
+            | Action::Schedules
+            | Action::Schedule(_) => return driver.state().await,
+        };
     driver.apply(change).await
 }
 
@@ -469,6 +656,22 @@ pub async fn run_once(ctx: &AppContext, args: &str) -> Result<String, String> {
     } else {
         Ok(reply.toast)
     }
+}
+
+/// Prints the raw data points of `light` (the `light dps` CLI command), to
+/// diagnose unsupported devices.
+pub async fn dps_once(ctx: &AppContext, light: Option<&str>) -> Result<String, String> {
+    let settings = current_settings(ctx);
+    let (_, config) = light
+        .or(settings.default_device())
+        .and_then(|name| settings.devices().get_key_value(name))
+        .ok_or_else(|| format!("which light? {}", names(&settings)))?;
+
+    let dps = TuyaLight::new(config)
+        .raw_dps()
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&dps).map_err(|error| error.to_string())
 }
 
 /// Prints the states `light` reports until interrupted (the `light watch`
@@ -743,6 +946,54 @@ local_key = "k"
     }
 
     #[tokio::test]
+    async fn scenes_play_and_dim() {
+        let light = FakeLight::new();
+        let lights = lights_with(&light);
+        let ctx = ctx(CONFIG).await;
+
+        let reply = run(&lights, &ctx, "rainbow").await;
+        assert!(!reply.failed, "{}", reply.text);
+        assert_eq!(light.current().mode, Mode::Scene);
+        assert!(reply.toast.contains("rainbow scene"), "{}", reply.toast);
+
+        let reply = run(&lights, &ctx, "brightness 30").await;
+        assert_eq!(light.current().mode, Mode::Scene, "still playing");
+        assert_eq!(light.current().scene.unwrap().brightness(), 30);
+        assert!(
+            reply.toast.contains("on · 30% · rainbow scene"),
+            "{}",
+            reply.toast
+        );
+
+        let picker = run(&lights, &ctx, "scenes").await;
+        assert!(picker.text.contains("Pick a scene"), "{}", picker.text);
+        assert_eq!(picker.panel_of, None, "not a live panel");
+    }
+
+    #[tokio::test]
+    async fn custom_scenes_are_managed_through_the_settings() {
+        let light = FakeLight::new();
+        let lights = lights_with(&light);
+        let ctx = ctx(CONFIG).await;
+
+        let reply = run(
+            &lights,
+            &ctx,
+            "scene add party jump red green blue speed 80",
+        )
+        .await;
+        assert!(!reply.failed, "{}", reply.text);
+        assert!(current_settings(&ctx).scenes().contains_key("party"));
+
+        let reply = run(&lights, &ctx, "party").await;
+        assert!(reply.toast.contains("party scene"), "{}", reply.toast);
+        assert_eq!(light.current().scene.unwrap().steps.len(), 3);
+
+        assert!(!run(&lights, &ctx, "scene remove party").await.failed);
+        assert!(current_settings(&ctx).scenes().is_empty());
+    }
+
+    #[tokio::test]
     async fn schedules_are_managed_through_the_settings() {
         let light = FakeLight::new();
         let lights = lights_with(&light);
@@ -809,6 +1060,130 @@ local_key = "k"
         assert!(result.is_err(), "the fade was cancelled");
         assert!(!light.current().on);
         assert!(lights.fades().is_empty());
+    }
+
+    fn captured(state: LightState) -> Result<Captured, String> {
+        let settings: LightsSettings = serde_json::from_value(serde_json::json!({
+            "devices": { "bedroom": { "id": "a", "local_key": "k" } },
+        }))
+        .unwrap();
+        capture(&state, &settings, "cosy")
+    }
+
+    fn look(mode: Mode) -> LightState {
+        LightState {
+            on: true,
+            mode,
+            brightness: 40,
+            temperature: Some(20),
+            color: None,
+            scene: None,
+            supports_color: true,
+        }
+    }
+
+    #[test]
+    fn captures_whites_and_colours() {
+        use serde_json::json;
+
+        assert_eq!(
+            captured(look(Mode::White)).unwrap().preset,
+            json!({ "brightness": 40, "temperature": 20 })
+        );
+
+        let mut colour = look(Mode::Colour);
+        colour.color = Some(model::parse_color("#ffaa00").unwrap().with_value(40));
+        assert_eq!(
+            captured(colour).unwrap().preset,
+            json!({ "brightness": 40, "color": "#ffaa00" })
+        );
+
+        assert!(captured(look(Mode::Other("music".into()))).is_err());
+    }
+
+    #[test]
+    fn captures_scenes() {
+        use serde_json::json;
+
+        let settings = LightsSettings::default();
+        let mut known = look(Mode::Scene);
+        known.scene = Some(
+            scenes::find("rainbow", &settings)
+                .unwrap()
+                .with_brightness(40),
+        );
+        assert_eq!(
+            captured(known).unwrap(),
+            Captured {
+                preset: json!({ "brightness": 40, "scene": "rainbow" }),
+                scene: None,
+            }
+        );
+
+        // The bedroom bulb's app scene: one static orange step at 1 %.
+        let mut single = look(Mode::Scene);
+        single.brightness = 1;
+        single.scene = tuya::decode_scene("07000000002803e8000a00000000");
+        assert_eq!(
+            captured(single).unwrap().preset,
+            json!({ "brightness": 1, "color": "#ffaa00" })
+        );
+
+        let mut several = look(Mode::Scene);
+        several.scene =
+            tuya::decode_scene("075a5a01000003e803e8000000005a5a0100e603e803e800000000");
+        let captured = captured(several).unwrap();
+        assert_eq!(
+            captured.preset,
+            json!({ "brightness": 40, "scene": "cosy-scene" })
+        );
+        let (name, spec) = captured.scene.unwrap();
+        assert_eq!(name, "cosy-scene");
+        assert_eq!(spec["transition"], "jump");
+        assert_eq!(spec["speed"], 90);
+        assert_eq!(spec["steps"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn saved_presets_reproduce_the_look() {
+        let light = FakeLight::new();
+        let lights = lights_with(&light);
+        let ctx = ctx(CONFIG).await;
+
+        run(&lights, &ctx, "color #ffaa00").await;
+        run(&lights, &ctx, "brightness 20").await;
+        let reply = run(&lights, &ctx, "save cosy").await;
+        assert!(!reply.failed, "{}", reply.text);
+        assert!(reply.text.contains("Saved cosy"), "{}", reply.text);
+        let saved = light.current();
+
+        run(&lights, &ctx, "cool").await;
+        run(&lights, &ctx, "cosy").await;
+        let restored = light.current();
+        assert_eq!((restored.mode, restored.color), (saved.mode, saved.color));
+        assert_eq!(restored.brightness, saved.brightness);
+
+        // Saving again replaces the preset, even one from the config file.
+        run(&lights, &ctx, "rainbow").await;
+        assert!(!run(&lights, &ctx, "save night").await.failed);
+        let night = current_settings(&ctx).presets()["night"].clone();
+        assert_eq!(night.scene.as_deref(), Some("rainbow"));
+        assert_eq!(
+            night.temperature, None,
+            "replaced, not merged with the file's"
+        );
+
+        // A custom scene's name is taken; a built-in one's may be reused, the
+        // scene staying available as `scene <name>`.
+        run(&lights, &ctx, "scene add party jump red blue").await;
+        assert!(run(&lights, &ctx, "save party").await.failed);
+        assert!(!run(&lights, &ctx, "save rainbow").await.failed);
+        assert!(matches!(
+            command::parse("scene rainbow", &current_settings(&ctx))
+                .unwrap()
+                .action,
+            Action::Scene(_)
+        ));
     }
 
     #[test]
