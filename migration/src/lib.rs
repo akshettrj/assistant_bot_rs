@@ -8,6 +8,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m20240914_000001_create_users_info;
 mod m20260926_000001_create_settings;
+mod m20260927_000001_create_chats_info;
 
 pub struct Migrator;
 
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20240914_000001_create_users_info::Migration),
             Box::new(m20260926_000001_create_settings::Migration),
+            Box::new(m20260927_000001_create_chats_info::Migration),
         ]
     }
 }

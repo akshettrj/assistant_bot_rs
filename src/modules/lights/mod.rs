@@ -34,10 +34,10 @@ use futures::future::BoxFuture;
 use teloxide::{
     ApiError, RequestError,
     prelude::*,
-    types::{InlineKeyboardMarkup, ParseMode, ReplyParameters},
+    types::{InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters},
     utils::{
         command::BotCommands,
-        html::{code_inline, escape},
+        html::{bold, code_inline, escape},
     },
 };
 use tokio::task::AbortHandle;
@@ -57,6 +57,7 @@ use crate::{
     bot::AssistantBot,
     context::AppContext,
     modules::{HandlerResult, Module, ModuleInfo, UpdateHandler},
+    prompts::{self, Answer},
     settings::ModuleSettings,
 };
 
@@ -132,8 +133,18 @@ impl Module for LightsModule {
     fn handler(&self) -> UpdateHandler {
         let on_command = Arc::clone(&self.lights);
         let on_button = Arc::clone(&self.lights);
+        let on_name = Arc::clone(&self.lights);
 
         dptree::entry()
+            .branch(
+                Update::filter_message()
+                    .filter_map(|msg: Message, ctx: Arc<AppContext>| {
+                        ctx.prompts.answer::<SaveAs>(ID, &msg)
+                    })
+                    .endpoint(move |bot, msg, answer, ctx| {
+                        handle_preset_name(Arc::clone(&on_name), bot, msg, answer, ctx)
+                    }),
+            )
             .branch(
                 Update::filter_message()
                     .filter_command::<Command>()
@@ -763,6 +774,9 @@ async fn handle_button(
         Some((light, _)) if !settings.devices().contains_key(light) => {
             Reply::error(format!("{} is no longer configured", code_inline(light)))
         }
+        Some((light, panel::SAVE)) if message.is_some() => {
+            return ask_preset_name(&bot, &ctx, &query, light).await;
+        }
         Some((light, words)) => {
             if let Some(message) = message {
                 lights.panels.track(light, message.chat.id, message.id, "");
@@ -796,6 +810,120 @@ async fn handle_button(
         match edit {
             Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => {}
             Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// The 💾 button's question: the name to save the light's look as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SaveAs {
+    light: String,
+    /// The panel to refresh, with the new preset's button.
+    panel: MessageId,
+}
+
+async fn ask_preset_name(
+    bot: &AssistantBot,
+    ctx: &AppContext,
+    query: &CallbackQuery,
+    light: &str,
+) -> HandlerResult {
+    let Some(message) = query.regular_message() else {
+        return Ok(());
+    };
+    // First, so that the button stops spinning even if asking fails.
+    bot.answer_callback_query(query.id.clone())
+        .text("💾 Send a name for the preset")
+        .await?;
+
+    let chat = message.chat.id;
+    let text = format!(
+        "Send a name for the new preset: it will be how {} looks now.\n\n{}",
+        bold(&escape(light)),
+        escape("Send /cancel to stop.")
+    );
+    let sent = bot
+        .send_message(chat, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(prompts::force_reply("Preset name"))
+        .await?;
+
+    let save_as = SaveAs {
+        light: light.to_string(),
+        panel: message.id,
+    };
+    if let Some(replaced) = ctx
+        .prompts
+        .ask(ID, chat, query.from.id, sent.id, false, save_as)
+    {
+        prompts::discard(bot, chat, &replaced, "Replaced").await?;
+    }
+    Ok(())
+}
+
+async fn handle_preset_name(
+    lights: Arc<Lights>,
+    bot: AssistantBot,
+    msg: Message,
+    answer: Answer<SaveAs>,
+    ctx: Arc<AppContext>,
+) -> HandlerResult {
+    let chat = msg.chat.id;
+    let Some(user) = msg.from.as_ref().map(|user| user.id) else {
+        return Ok(());
+    };
+    let Answer { prompt, data } = answer;
+    if Answer::<SaveAs>::is_cancel(&msg) {
+        ctx.prompts.finish(chat, user);
+        prompts::clean_up(&bot, &msg, &prompt, "Cancelled").await?;
+        return Ok(());
+    }
+
+    let origin = Origin {
+        ctx: &ctx,
+        bot: Some(&bot),
+        user: Some(user),
+    };
+    let settings = current_settings(&ctx);
+    let name = msg.text().unwrap_or_default().trim().to_ascii_lowercase();
+    let reply = match (name.split_whitespace().count(), name.as_str()) {
+        (1, name) => match command::parse(&format!("{} save {name}", data.light), &settings) {
+            Ok(request) => lights.run(&origin, request).await,
+            Err(problem) => Reply::error(problem),
+        },
+        _ => Reply::error("send a single word, e.g. cosy".to_string()),
+    };
+
+    if reply.failed {
+        bot.send_message(chat, format!("{}\nTry again, or send /cancel.", reply.text))
+            .parse_mode(ParseMode::Html)
+            .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
+            .await?;
+        return Ok(());
+    }
+
+    ctx.prompts.finish(chat, user);
+    prompts::clean_up(&bot, &msg, &prompt, "").await?;
+    bot.send_message(chat, &reply.text)
+        .parse_mode(ParseMode::Html)
+        .await?;
+
+    // The panel gets the new preset's button.
+    let status = Request {
+        light: Some(data.light),
+        action: Action::Status,
+    };
+    let panel = lights.run(&origin, status).await;
+    if let Some(keyboard) = panel.keyboard {
+        let edit = bot
+            .edit_message_text(chat, data.panel, panel.text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboard)
+            .await;
+        match edit {
+            Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => {}
+            Err(error) => tracing::debug!(%error, "couldn't refresh the panel"),
         }
     }
     Ok(())

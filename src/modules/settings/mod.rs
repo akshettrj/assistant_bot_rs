@@ -6,8 +6,9 @@
 //! themselves live in [`crate::settings`], shared with the CLI.
 //!
 //! The panel's editors follow the [`Kind`](crate::settings::kind::Kind) each
-//! setting declares; values that must be typed are asked for with a prompt
-//! ([`input`]).
+//! setting declares; values that must be typed are asked for with a
+//! [prompt](crate::prompts). Other modules link to their settings with
+//! [`settings_button`].
 
 mod callback;
 mod edit;
@@ -21,14 +22,14 @@ use serde_json::Value;
 use teloxide::{
     ApiError, RequestError,
     prelude::*,
-    types::{MessageId, ParseMode, ReplyMarkup, ReplyParameters},
+    types::{InlineKeyboardButton, MessageId, ParseMode, ReplyParameters},
     utils::{command::BotCommands, html::escape},
 };
 
 use self::{
-    callback::{Button, Page, Target},
+    callback::{Button, Page},
     edit::Edit,
-    input::{Answer, Prompt, Prompts, ReadError},
+    input::{Question, ReadError},
     panel::{Screen, Setting},
     text::{Action, USAGE},
 };
@@ -37,6 +38,7 @@ use crate::{
     bot::{AssistantBot, MAX_MESSAGE_CHARS, command_menu, truncate_chars},
     context::AppContext,
     modules::{HandlerResult, Module, ModuleInfo, UpdateHandler},
+    prompts::{self, Answer},
     settings::{
         SettingsError,
         command::{self, Outcome},
@@ -44,6 +46,8 @@ use crate::{
         parse_value,
     },
 };
+
+pub const ID: &str = "settings";
 
 /// Toasts are limited to 200 characters.
 const MAX_TOAST_CHARS: usize = 200;
@@ -55,21 +59,18 @@ enum Command {
     Config(String),
 }
 
-#[derive(Default)]
-pub struct SettingsModule {
-    prompts: Arc<Prompts>,
+/// A button that posts the settings of `module` as a new message, for the
+/// module's own panels. Only the owner can use it.
+pub fn settings_button(module: &str) -> Option<InlineKeyboardButton> {
+    panel::post_button("⚙️ Settings", Page::Module(module.to_string()))
 }
 
-impl SettingsModule {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+pub struct SettingsModule;
 
 impl Module for SettingsModule {
     fn info(&self) -> ModuleInfo {
         ModuleInfo {
-            id: "settings",
+            id: ID,
             name: "Settings",
             description: "Runtime configuration of the assistant",
             access: AccessPolicy::OwnerOnly,
@@ -85,18 +86,13 @@ impl Module for SettingsModule {
     }
 
     fn handler(&self) -> UpdateHandler {
-        let waiting = Arc::clone(&self.prompts);
-        let on_answer = Arc::clone(&self.prompts);
-        let on_button = Arc::clone(&self.prompts);
-
         dptree::entry()
-            // First, so that answers are not taken for something else.
             .branch(
                 Update::filter_message()
-                    .filter_map(move |msg: Message| waiting.answered_by(&msg))
-                    .endpoint(move |bot, msg, prompt, ctx| {
-                        handle_answer(Arc::clone(&on_answer), bot, msg, prompt, ctx)
-                    }),
+                    .filter_map(|msg: Message, ctx: Arc<AppContext>| {
+                        ctx.prompts.answer::<Question>(ID, &msg)
+                    })
+                    .endpoint(handle_answer),
             )
             .branch(
                 Update::filter_message()
@@ -111,9 +107,7 @@ impl Module for SettingsModule {
                             .as_deref()
                             .is_some_and(|data| data.starts_with(callback::PREFIX))
                     })
-                    .endpoint(move |bot, query, ctx| {
-                        handle_button(Arc::clone(&on_button), bot, query, ctx)
-                    }),
+                    .endpoint(handle_button),
             )
     }
 }
@@ -129,11 +123,7 @@ async fn handle_command(
 
     let (text, outcome) = match text::parse_action(&args) {
         Ok(Action::Panel) => {
-            let screen = panel::render(&ctx, &Page::Home, None).await?;
-            bot.send_message(msg.chat.id, screen.text)
-                .parse_mode(ParseMode::Html)
-                .reply_markup(screen.keyboard)
-                .await?;
+            post(&bot, &ctx, msg.chat.id, &Page::Home).await?;
             return Ok(());
         }
         Ok(Action::Help) => (escape(USAGE), None),
@@ -164,7 +154,6 @@ async fn handle_command(
 }
 
 async fn handle_button(
-    prompts: Arc<Prompts>,
     bot: AssistantBot,
     query: CallbackQuery,
     ctx: Arc<AppContext>,
@@ -194,33 +183,49 @@ async fn handle_button(
         }
         Button::Open(page) => {
             answer("", false).await?;
-            let screen = panel::render(&ctx, &page, None).await?;
+            let screen = panel::render(&ctx, Some(&bot), &page, None).await?;
             return Ok(show(&bot, chat, message.id, &screen).await?);
+        }
+        Button::Post(page) => {
+            answer("", false).await?;
+            post(&bot, &ctx, chat, &page).await?;
+            return Ok(());
         }
         Button::Ask(target, ask) => {
             let Some(setting) = Setting::resolve(&ctx, &target) else {
                 answer("This setting no longer exists", true).await?;
                 return Ok(());
             };
-            let current = ctx.settings.current().value(&setting.key());
-            let (text, markup, keyboard) = input::question(&setting, ask, current.as_ref());
+            // First, so that the button stops spinning even if asking fails.
+            answer("✏️ Waiting for your answer", false).await?;
+
+            let current = setting.value(&ctx.settings.current());
+            let pickers = prompts::pickers_work_in(&message.chat);
+            let (text, markup, keyboard) =
+                input::question(&setting, ask, current.as_ref(), pickers);
             let sent = bot
                 .send_message(chat, text)
                 .parse_mode(ParseMode::Html)
                 .reply_markup(markup)
                 .await?;
 
-            let prompt = Prompt::new(target, ask, message.id, sent.id, keyboard);
-            if let Some(replaced) = prompts.insert(chat, query.from.id, prompt) {
-                let _ = bot.delete_message(chat, replaced.message).await;
+            let question = Question {
+                target,
+                ask,
+                panel: message.id,
+            };
+            let replaced = ctx
+                .prompts
+                .ask(ID, chat, query.from.id, sent.id, keyboard, question);
+            if let Some(replaced) = replaced {
+                prompts::discard(&bot, chat, &replaced, "Replaced").await?;
             }
-            answer("✏️ Waiting for your answer", false).await?;
             return Ok(());
         }
         button => match edit_for(&ctx, button) {
             Ok(edit) => edit,
             Err(problem) => {
-                answer(&problem, true).await?;
+                answer(problem, true).await?;
                 return Ok(());
             }
         },
@@ -229,7 +234,7 @@ async fn handle_button(
     match edit::apply(&ctx, edit, Some(query.from.id)).await {
         Ok(applied) => {
             answer(&applied.notice, false).await?;
-            let screen = panel::render(&ctx, &page, Some(&applied.notice)).await?;
+            let screen = panel::render(&ctx, Some(&bot), &page, Some(&applied.notice)).await?;
             show(&bot, chat, message.id, &screen).await?;
             if let Some(change) = applied.change {
                 command_menu::sync(&bot, &ctx, Some(&change.previous)).await;
@@ -244,70 +249,76 @@ async fn handle_button(
 }
 
 /// The edit a button makes, and the page to show afterwards.
-fn edit_for(ctx: &AppContext, button: Button) -> Result<(Edit, Page), String> {
+fn edit_for(ctx: &AppContext, button: Button) -> Result<(Edit, Page), &'static str> {
     const GONE: &str = "This setting no longer exists";
+    const NO_CHOICE: &str = "This choice no longer exists";
     let snapshot = ctx.settings.current();
-    let key_of = |target: &Target| {
-        Setting::resolve(ctx, target)
-            .map(|setting| setting.key())
-            .ok_or(GONE)
-    };
 
     let (target, edit) = match button {
         Button::Reload => return Ok((Edit::Reload, Page::Home)),
         Button::Toggle(target, choice) => {
             let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
-            let choice = panel::choices_of(ctx, &snapshot, &setting.kind)
+            let choice = setting
+                .kind
+                .choices(&snapshot, &ctx.modules)
                 .into_iter()
                 .nth(choice)
-                .ok_or("This choice no longer exists")?;
-            let key = setting.key();
+                .ok_or(NO_CHOICE)?;
             let item = Value::String(choice.value);
-            let listed =
-                matches!(snapshot.value(&key), Some(Value::Array(items)) if items.contains(&item));
+            let listed = matches!(
+                setting.value(&snapshot),
+                Some(Value::Array(items)) if items.contains(&item)
+            );
             let edit = if listed {
-                Edit::Remove(key, item)
+                setting.change_list(&snapshot, Vec::new(), Some(item))
             } else {
-                Edit::Extend(key, vec![item])
+                setting.change_list(&snapshot, vec![item], None)
             };
             (target, edit)
         }
         Button::Pick(target, choice) => {
             let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
-            let choice = panel::choices_of(ctx, &snapshot, &setting.kind)
+            let choice = setting
+                .kind
+                .choices(&snapshot, &ctx.modules)
                 .into_iter()
                 .nth(choice)
-                .ok_or("This choice no longer exists")?;
+                .ok_or(NO_CHOICE)?;
             if let Kind::Map { value, .. } = setting.kind {
                 // A new entry, named after the choice.
-                let entry = target.entry(&choice.value);
                 let empty = value
                     .empty_value()
                     .ok_or("This entry must be typed in; use ➕ Add")?;
                 let key = format!("{}.{}", setting.key(), choice.value);
+                let entry = target.entry(&choice.value);
                 return Ok((Edit::Set(key, empty), Page::Setting(entry)));
             }
-            let key = setting.key();
-            (target, Edit::Set(key, Value::String(choice.value)))
+            let value = setting.kind.choice_value(&choice.value);
+            let edit = setting.set(&snapshot, Some(value));
+            (target, edit)
         }
         Button::Remove(target, item) => {
-            let key = key_of(&target)?;
-            (target, Edit::Remove(key, parse_value(&item)))
+            let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
+            let edit = setting.change_list(&snapshot, Vec::new(), Some(parse_value(&item)));
+            (target, edit)
         }
         Button::Clear(target) => {
-            let key = key_of(&target)?;
-            (target, Edit::Set(key, Value::Null))
+            let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
+            let edit = setting.set(&snapshot, None);
+            (target, edit)
         }
         Button::Reset(target) => {
-            let key = key_of(&target)?;
+            let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
+            let key = setting.key();
             (target, Edit::Reset(key))
         }
         Button::Delete(target) => {
-            let key = key_of(&target)?;
+            let setting = Setting::resolve(ctx, &target).ok_or(GONE)?;
+            let key = setting.key();
             let parent = target.parent().ok_or(GONE)?;
             return Ok((Edit::DeleteEntry(key), Page::Setting(parent)));
         }
-        Button::Open(_) | Button::Ask(..) | Button::Close => {
+        Button::Open(_) | Button::Post(_) | Button::Ask(..) | Button::Close => {
             unreachable!("handled by handle_button")
         }
     };
@@ -315,39 +326,39 @@ fn edit_for(ctx: &AppContext, button: Button) -> Result<(Edit, Page), String> {
 }
 
 async fn handle_answer(
-    prompts: Arc<Prompts>,
     bot: AssistantBot,
     msg: Message,
-    prompt: Prompt,
+    answer: Answer<Question>,
     ctx: Arc<AppContext>,
 ) -> HandlerResult {
     let chat = msg.chat.id;
     let Some(user) = msg.from.as_ref().map(|user| user.id) else {
         return Ok(());
     };
-    let Some(setting) = Setting::resolve(&ctx, &prompt.target) else {
-        prompts.remove(chat, user);
+    let Answer { prompt, data } = answer;
+    let Some(setting) = Setting::resolve(&ctx, &data.target) else {
+        ctx.prompts.finish(chat, user);
+        prompts::clean_up(&bot, &msg, &prompt, "This setting no longer exists").await?;
         return Ok(());
     };
 
-    let problem = match input::read(&ctx, &setting, &prompt, &msg).await {
-        Ok(Answer::Cancel) => {
-            prompts.remove(chat, user);
-            clean_up(&bot, &msg, &prompt, "Cancelled").await?;
-            return Ok(());
-        }
-        Ok(Answer::Edit(edit, page)) => match edit::apply(&ctx, edit, Some(user)).await {
-            Ok(applied) => {
-                prompts.remove(chat, user);
-                clean_up(&bot, &msg, &prompt, &applied.notice).await?;
+    if Answer::<Question>::is_cancel(&msg) {
+        ctx.prompts.finish(chat, user);
+        prompts::clean_up(&bot, &msg, &prompt, "Cancelled").await?;
+        return Ok(());
+    }
 
-                let screen = panel::render(&ctx, &page, Some(&applied.notice)).await?;
-                if show(&bot, chat, prompt.panel, &screen).await.is_err() {
+    let snapshot = ctx.settings.current();
+    let problem = match input::read(&ctx, &snapshot, &setting, &data, &msg).await {
+        Ok((edit, page)) => match edit::apply(&ctx, edit, Some(user)).await {
+            Ok(applied) => {
+                ctx.prompts.finish(chat, user);
+                prompts::clean_up(&bot, &msg, &prompt, &applied.notice).await?;
+
+                let screen = panel::render(&ctx, Some(&bot), &page, Some(&applied.notice)).await?;
+                if show(&bot, chat, data.panel, &screen).await.is_err() {
                     // The panel is gone: post a new one.
-                    bot.send_message(chat, screen.text)
-                        .parse_mode(ParseMode::Html)
-                        .reply_markup(screen.keyboard)
-                        .await?;
+                    send(&bot, chat, &screen).await?;
                 }
                 if let Some(change) = applied.change {
                     command_menu::sync(&bot, &ctx, Some(&change.previous)).await;
@@ -376,23 +387,18 @@ async fn handle_answer(
     Ok(())
 }
 
-/// Removes the prompt and its answer, leaving the chat as it was before
-/// (bar a short `notice` when the pickers' keyboard must be removed).
-async fn clean_up(
-    bot: &AssistantBot,
-    answer: &Message,
-    prompt: &Prompt,
-    notice: &str,
-) -> Result<(), RequestError> {
-    let chat = answer.chat.id;
-    // Best effort: old messages cannot be deleted.
-    let _ = bot.delete_message(chat, prompt.message).await;
-    let _ = bot.delete_message(chat, answer.id).await;
-    if prompt.keyboard {
-        bot.send_message(chat, notice.to_string())
-            .reply_markup(ReplyMarkup::kb_remove())
-            .await?;
-    }
+/// Posts `page` as a new panel.
+async fn post(bot: &AssistantBot, ctx: &AppContext, chat: ChatId, page: &Page) -> HandlerResult {
+    let screen = panel::render(ctx, Some(bot), page, None).await?;
+    send(bot, chat, &screen).await?;
+    Ok(())
+}
+
+async fn send(bot: &AssistantBot, chat: ChatId, screen: &Screen) -> Result<(), RequestError> {
+    bot.send_message(chat, truncate_chars(screen.text.clone(), MAX_MESSAGE_CHARS))
+        .parse_mode(ParseMode::Html)
+        .reply_markup(screen.keyboard.clone())
+        .await?;
     Ok(())
 }
 
@@ -430,7 +436,7 @@ mod tests {
     use serde_json::json;
     use teloxide::types::{InlineKeyboardButtonKind, UserId};
 
-    use super::*;
+    use super::{callback::Target, *};
     use crate::{
         modules::builtin,
         test_support::{BASE_CONFIG, context},
@@ -465,10 +471,14 @@ mod tests {
             .1
     }
 
+    async fn render(ctx: &AppContext, page: &Page) -> Screen {
+        panel::render(ctx, None, page, None).await.unwrap()
+    }
+
     async fn press(ctx: &AppContext, button: Button) -> Screen {
         let (edit, page) = edit_for(ctx, button).unwrap();
         let applied = edit::apply(ctx, edit, Some(UserId(1))).await.unwrap();
-        panel::render(ctx, &page, Some(&applied.notice))
+        panel::render(ctx, None, &page, Some(&applied.notice))
             .await
             .unwrap()
     }
@@ -476,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn the_home_screen_lists_the_settings_and_modules() {
         let ctx = context(BASE_CONFIG, builtin()).await;
-        let home = panel::render(&ctx, &Page::Home, None).await.unwrap();
+        let home = render(&ctx, &Page::Home).await;
         let labels: Vec<_> = buttons(&home).into_iter().map(|(text, _)| text).collect();
 
         assert!(
@@ -506,7 +516,7 @@ mod tests {
     async fn modules_are_toggled_on_and_off() {
         let ctx = context(BASE_CONFIG, builtin()).await;
         let modules = Page::Setting(target(&ctx, "modules.disabled"));
-        let screen = panel::render(&ctx, &modules, None).await.unwrap();
+        let screen = render(&ctx, &modules).await;
 
         let screen = press(&ctx, find(&screen, "✅ Lights")).await;
         assert!(!ctx.settings.current().is_enabled("lights"));
@@ -526,10 +536,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn choices_are_picked_and_cleared() {
+    async fn choices_are_picked() {
         let ctx = context(BASE_CONFIG, builtin()).await;
         let filter = Page::Setting(target(&ctx, "logging.filter"));
-        let screen = panel::render(&ctx, &filter, None).await.unwrap();
+        let screen = render(&ctx, &filter).await;
 
         let screen = press(&ctx, find(&screen, "debug (the bot only)")).await;
         assert_eq!(
@@ -551,9 +561,7 @@ mod tests {
     async fn map_entries_are_added_from_their_names_and_deleted() {
         let ctx = context(BASE_CONFIG, builtin()).await;
         let allowed = target(&ctx, "telegram.allowed_users");
-        let screen = panel::render(&ctx, &Page::Setting(allowed.clone()), None)
-            .await
-            .unwrap();
+        let screen = render(&ctx, &Page::Setting(allowed.clone())).await;
 
         // A new entry, opened right away.
         let screen = press(&ctx, find(&screen, "➕ Lights")).await;
@@ -580,9 +588,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let screen = panel::render(&ctx, &Page::Setting(allowed.entry("lights")), None)
-            .await
-            .unwrap();
+        let screen = render(&ctx, &Page::Setting(allowed.entry("lights"))).await;
         assert_eq!(
             find(&screen, "❌ 5"),
             Button::Remove(allowed.entry("lights"), "5".into())
@@ -598,6 +604,124 @@ mod tests {
                 .is_empty()
         );
         assert!(screen.text.contains("No entries yet"), "{}", screen.text);
+    }
+
+    #[tokio::test]
+    async fn known_users_and_chats_are_shown_by_name() {
+        let ctx = context(BASE_CONFIG, builtin()).await;
+        let ann: teloxide::types::User = serde_json::from_value(json!({
+            "id": 7, "is_bot": false, "first_name": "Ann", "username": "ann"
+        }))
+        .unwrap();
+        crate::db::repositories::users::upsert(&ctx.db, &ann)
+            .await
+            .unwrap();
+        crate::db::repositories::chats::upsert(&ctx.db, ChatId(-100), Some("Family"), None)
+            .await
+            .unwrap();
+        for (key, value) in [
+            ("telegram.sudo_users_id", json!([7, 8])),
+            ("telegram.allowed_chats.lights", json!([-100])),
+            ("telegram.error_logs_chat_id", json!(-100)),
+        ] {
+            edit::apply(&ctx, Edit::Set(key.into(), value), None)
+                .await
+                .unwrap();
+        }
+
+        let sudo = render(&ctx, &Page::Setting(target(&ctx, "telegram.sudo_users_id"))).await;
+        assert!(sudo.text.contains("Ann (@ann)"), "{}", sudo.text);
+        assert_eq!(
+            find(&sudo, "❌ Ann"),
+            Button::Remove(target(&ctx, "telegram.sudo_users_id"), "7".into())
+        );
+        find(&sudo, "❌ 8");
+
+        let chats = target(&ctx, "telegram.allowed_chats").entry("lights");
+        let chats = render(&ctx, &Page::Setting(chats)).await;
+        find(&chats, "❌ Family");
+
+        let errors = target(&ctx, "telegram.error_logs_chat_id");
+        let errors = render(&ctx, &Page::Setting(errors)).await;
+        assert!(errors.text.contains("Now: Family"), "{}", errors.text);
+    }
+
+    #[tokio::test]
+    async fn presets_are_edited_field_by_field() {
+        let ctx = context(BASE_CONFIG, builtin()).await;
+        let presets = target(&ctx, "modules.lights.presets");
+        edit::apply(
+            &ctx,
+            Edit::Set(
+                "modules.lights.presets.night".into(),
+                json!({ "brightness": 5, "temperature": "warm" }),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+        let preset =
+            |ctx: &AppContext| ctx.settings.current().value("modules.lights.presets.night");
+
+        let night = render(&ctx, &Page::Setting(presets.entry("night"))).await;
+        assert!(
+            buttons(&night)
+                .iter()
+                .any(|(label, _)| label == "Brightness: 5% ›"),
+            "{:?}",
+            buttons(&night)
+        );
+
+        // A suggested brightness.
+        let brightness = render(&ctx, &Page::Setting(presets.entry("night").field(0))).await;
+        press(&ctx, find(&brightness, "25%")).await;
+        assert_eq!(
+            preset(&ctx),
+            Some(json!({ "brightness": 25, "temperature": "warm" }))
+        );
+
+        // A colour replaces the white temperature.
+        let colour = render(&ctx, &Page::Setting(presets.entry("night").field(2))).await;
+        assert!(
+            colour.text.contains("clears White or Scene"),
+            "{}",
+            colour.text
+        );
+        press(&ctx, find(&colour, "orange")).await;
+        assert_eq!(
+            preset(&ctx),
+            Some(json!({ "brightness": 25, "color": "orange" }))
+        );
+
+        // Scenes are listed, built-in ones included.
+        let scene = render(&ctx, &Page::Setting(presets.entry("night").field(3))).await;
+        press(&ctx, find(&scene, "rainbow")).await;
+        assert_eq!(
+            preset(&ctx),
+            Some(json!({ "brightness": 25, "scene": "rainbow" }))
+        );
+
+        // Fields are cleared with 🚫 None.
+        let scene = render(&ctx, &Page::Setting(presets.entry("night").field(3))).await;
+        press(&ctx, find(&scene, "None")).await;
+        assert_eq!(preset(&ctx), Some(json!({ "brightness": 25 })));
+
+        // An invalid preset is refused.
+        let brightness = render(&ctx, &Page::Setting(presets.entry("night").field(0))).await;
+        let (edit, _) = edit_for(&ctx, find(&brightness, "None")).unwrap();
+        assert!(edit::apply(&ctx, edit, None).await.is_err());
+    }
+
+    #[test]
+    fn other_modules_link_to_their_settings() {
+        let button = settings_button("lights").unwrap();
+        let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
+            panic!()
+        };
+        assert_eq!(
+            Button::parse(data),
+            Some(Button::Post(Page::Module("lights".into())))
+        );
     }
 
     #[tokio::test]

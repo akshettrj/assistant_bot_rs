@@ -6,7 +6,7 @@ use std::{
 
 use teloxide::{
     dptree,
-    types::{BotCommand, ChatId, Update, UserId},
+    types::{BotCommand, ChatId, Update, UpdateKind, UserId},
 };
 
 use crate::{
@@ -269,10 +269,30 @@ impl ModuleRegistry {
 
     /// Routes every update to the first module that is enabled, allowed to
     /// and wants to handle it.
+    ///
+    /// A message answering a [prompt](crate::prompts) goes to the module that
+    /// asked first, whatever its position.
     pub fn handler(&self) -> UpdateHandler {
-        self.modules
+        let answers = self
+            .modules
             .iter()
             .fold(dptree::entry(), |root, registered| {
+                let id = registered.info.id;
+                root.branch(
+                    dptree::filter(move |update: Update, ctx: Arc<AppContext>| {
+                        let UpdateKind::Message(message) = &update.kind else {
+                            return false;
+                        };
+                        ctx.prompts.waiting(message) == Some(id)
+                    })
+                    .chain(access_gate(registered.info))
+                    .chain(registered.module.handler()),
+                )
+            });
+
+        self.modules
+            .iter()
+            .fold(dptree::entry().branch(answers), |root, registered| {
                 root.branch(access_gate(registered.info).chain(registered.module.handler()))
             })
     }
@@ -657,6 +677,61 @@ allowed_users = { restricted = [3] }
             !handled(1).await,
             "disabled modules are skipped, even for the owner"
         );
+    }
+
+    /// A module that records the updates it handles.
+    struct Recorder {
+        id: &'static str,
+        seen: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Module for Recorder {
+        fn info(&self) -> ModuleInfo {
+            ModuleInfo {
+                id: self.id,
+                name: self.id,
+                description: "test",
+                access: AccessPolicy::Public,
+            }
+        }
+
+        fn handler(&self) -> UpdateHandler {
+            let (id, seen) = (self.id, Arc::clone(&self.seen));
+            dptree::endpoint(move || {
+                seen.lock().unwrap().push(id);
+                async { Ok(()) }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn answers_to_prompts_go_to_the_module_that_asked() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = |id| {
+            Arc::new(Recorder {
+                id,
+                seen: Arc::clone(&seen),
+            }) as Arc<dyn Module>
+        };
+        let ctx = context(
+            crate::test_support::BASE_CONFIG,
+            vec![recorder("first"), recorder("second")],
+        )
+        .await;
+        let handler = ctx.modules.handler();
+        let dispatch = || handler.dispatch(deps![message_update(1), ctx.clone()]);
+
+        let _ = dispatch().await;
+        ctx.prompts.ask(
+            "second",
+            ChatId(1),
+            UserId(1),
+            teloxide::types::MessageId(9),
+            false,
+            (),
+        );
+        let _ = dispatch().await;
+        assert_eq!(*seen.lock().unwrap(), ["first", "second"]);
     }
 
     fn message_update(from: u64) -> Update {

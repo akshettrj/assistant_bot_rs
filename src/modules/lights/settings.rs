@@ -5,15 +5,17 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    model::{LightChange, Preset},
+    model::{LightChange, NAMED_COLORS, Preset},
+    panel,
     scenes::{self, SceneSpec},
     schedule::Schedule,
 };
 use crate::{
     config::Secret,
     settings::{
+        Snapshot,
         keys::RuntimeSetting,
-        kind::{Choices, Kind},
+        kind::{Choice, Choices, DynamicChoices, Field, FixedChoice, Form, Kind},
     },
 };
 
@@ -36,8 +38,8 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
     }),
     RuntimeSetting::per_entry(
         "presets",
-        "Named presets, e.g. {\"brightness\": 80, \"temperature\": \"warm\"}",
-        &Kind::Json,
+        "Named looks: a brightness, and a white, a colour or a scene",
+        &Kind::Form(&PRESET_FORM),
     ),
     RuntimeSetting::per_entry(
         "scenes",
@@ -50,6 +52,85 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         &Kind::Json,
     ),
 ];
+
+/// How a [`Preset`] is edited from the settings panel.
+const PRESET_FORM: Form = Form {
+    fields: &[
+        Field::new(
+            "brightness",
+            "Brightness",
+            Kind::Number {
+                min: 1,
+                max: 100,
+                unit: "%",
+                suggestions: &[5, 10, 25, 50, 75, 100],
+                optional: true,
+            },
+        ),
+        Field::new(
+            "temperature",
+            "White",
+            Kind::OneOf {
+                choices: Choices::Fixed(&[
+                    FixedChoice::new("warm", "🌅 warm"),
+                    FixedChoice::new("neutral", "⚪ neutral"),
+                    FixedChoice::new("cool", "❄️ cool"),
+                ]),
+                custom: true,
+                optional: true,
+            },
+        )
+        .group(LOOK),
+        Field::new(
+            "color",
+            "Colour",
+            Kind::OneOf {
+                choices: Choices::Dynamic(DynamicChoices(color_choices)),
+                custom: true,
+                optional: true,
+            },
+        )
+        .group(LOOK),
+        Field::new(
+            "scene",
+            "Scene",
+            Kind::OneOf {
+                choices: Choices::Dynamic(DynamicChoices(scene_choices)),
+                custom: false,
+                optional: true,
+            },
+        )
+        .group(LOOK),
+    ],
+    initial: r#"{"brightness": 100}"#,
+};
+
+/// A preset sets one of a white, a colour or a scene.
+const LOOK: &str = "look";
+
+fn color_choices(_: &Snapshot) -> Vec<Choice> {
+    NAMED_COLORS
+        .iter()
+        .map(|(name, _)| {
+            let emoji = panel::COLOR_BUTTONS
+                .iter()
+                .find(|(known, _)| known == name)
+                .map_or("🎨", |(_, emoji)| emoji);
+            Choice::new(*name, format!("{emoji} {name}"))
+        })
+        .collect()
+}
+
+fn scene_choices(snapshot: &Snapshot) -> Vec<Choice> {
+    let settings = snapshot
+        .module_settings::<LightsSettings>(super::ID)
+        .cloned()
+        .unwrap_or_default();
+    scenes::names(&settings)
+        .into_iter()
+        .map(|name| Choice::new(name.clone(), format!("🎬 {name}")))
+        .collect()
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "RawLightsSettings", into = "RawLightsSettings")]

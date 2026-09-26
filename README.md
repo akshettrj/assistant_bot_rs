@@ -72,13 +72,18 @@ gets an editor that fits it:
 | Error reports chat              | Telegram's group and channel pickers, or a typed chat id   |
 | Allowed users, allowed chats    | ➕ a module, then its users or chats as above               |
 | Timezone, start message         | ✏️ Change, then send the text (🗑 Clear to unset)            |
-| Presets, scenes, schedules      | an entry each, as JSON (➕ Add: `<name> <json>`)            |
+| Light presets                   | a form: brightness, then white, colour or scene           |
+| Scenes, schedules               | an entry each, as JSON (➕ Add: `<name> <json>`)            |
 
 A typed value answers the prompt the panel posts: send it as a message, or
 `/cancel`. The prompt and your answer are then deleted and the panel updates.
 ✏️ marks the settings changed from Telegram, and **↩️ Use the config file's
 value** removes the change. Users can also be added by id or by `@username`,
 if they have talked to the bot.
+
+Users and chats are shown by name: the bot remembers the people and groups it
+sees and the ones picked with Telegram's pickers, and asks Telegram about the
+rest.
 
 **Text commands**, for scripts and quick changes:
 
@@ -188,7 +193,8 @@ Setup, once per bulb:
 4. Grant access: `/config add telegram.allowed_users.lights <user id>`.
 
 Presets are runtime settings. The easiest way to make one is to set the light
-up as you like, from `/light` or the app, and save it:
+up as you like, from `/light` or the app, and save it with **💾 Save as preset**
+on the panel (it asks for a name) or:
 
 ```
 /light save cosy                   then /light cosy brings it back
@@ -203,6 +209,9 @@ shows:
   copy saved as the custom scene `<name>-scene`.
 
 Saving to an existing name replaces that preset, even one from the config file.
+Presets can also be edited with buttons: **⚙️ Settings** on the panel (owner
+only) › Presets › a preset, then its brightness, white, colour or scene. Setting
+a colour clears the white and the scene, and so on.
 A preset may be named after a built-in scene (e.g. `night`). `/light night` then
 applies the preset, and `/light scene night` still plays the scene.
 
@@ -281,6 +290,8 @@ src/
 ├── telemetry.rs              tracing subscriber with a reloadable filter
 ├── scheduling.rs             times of day, weekdays and recurrences
 ├── context.rs                AppContext: state shared with every handler
+├── prompts.rs                questions answered by the user's next message
+├── directory.rs              names for user and chat ids
 ├── access.rs                 who may use which module
 ├── bot/                      Telegram client, handler tree, error reporting,
 │                             command menus
@@ -295,12 +306,13 @@ nix/build.nix                 crane build and checks
 
 When an update arrives:
 
-1. The sender is recorded in `users_info`, so `@username`s can be resolved
-   later, which the Bot API can't do.
-2. Each module, in registration order, gets the update if it is enabled, the
+1. The sender is recorded in `users_info` (and the group in `chats_info`), so
+   `@username`s can be resolved and ids shown by name.
+2. A message answering a prompt goes to the module that asked first.
+3. Each module, in registration order, gets the update if it is enabled, the
    access rules allow it, and its handler matches it. All three are evaluated
    against the current settings snapshot.
-3. Handler errors are logged and sent to `telegram.error_logs_chat_id`.
+4. Handler errors are logged and sent to `telegram.error_logs_chat_id`.
 
 Settings changes build a new immutable `Snapshot` (config and access rules)
 and swap it in atomically. Handlers read `ctx.settings.current()`, so they
@@ -390,8 +402,11 @@ never see a half-applied change.
      effect);
    - the keys that can change at runtime, which then show up in `/config` and
      `settings list` as `modules.<id>.<key>`. Give them a
-     `.kind(...)` (`Kind::Text`, `Kind::OneOf`, `Kind::Users`, ...) so that the
-     settings panel offers a fitting editor; the default is JSON.
+     `.kind(...)` (`Kind::Text`, `Kind::Number`, `Kind::OneOf`, `Kind::Users`,
+     `Kind::Form`, ...) so that the settings panel offers a fitting editor; the
+     default is JSON. `Choices::Dynamic` lists choices computed from the
+     configuration, and `modules::settings::settings_button(ID)` links a
+     module's own panel to its settings.
 
    Read them with `ctx.settings.current().module_settings::<T>(ID)` for each
    update rather than caching them, so runtime changes are picked up.
@@ -401,6 +416,11 @@ never see a half-applied change.
 Long-running work, such as timers or device watchers, goes in
 `Module::background`. It starts with the bot and is cancelled at shutdown. See
 the `lights` module's schedules for an example.
+
+To ask for typed input (e.g. a name), post the question and register it with
+`ctx.prompts.ask(ID, chat, user, message, keyboard, data)`; the answer then
+reaches the module's handler first, read with
+`ctx.prompts.answer::<Data>(ID, &msg)` (see the lights module's 💾 button).
 
 At startup, the registry rejects duplicate module ids, commands declared by two
 modules, settings sections that match no module, runtime keys that are not

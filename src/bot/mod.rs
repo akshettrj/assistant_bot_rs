@@ -11,6 +11,7 @@ use anyhow::Context as _;
 use teloxide::{
     adaptors::{Throttle, throttle::Limits},
     prelude::*,
+    types::UpdateKind,
 };
 use tokio::task::JoinSet;
 
@@ -52,10 +53,24 @@ pub async fn run(ctx: Arc<AppContext>) -> anyhow::Result<()> {
         }
     }
 
+    let unhandled_bot = bot.clone();
     Dispatcher::builder(bot, handler::schema(&ctx.modules))
         .dependencies(dptree::deps![ctx])
-        .default_handler(|update| async move {
-            tracing::trace!(update_id = ?update.id, "unhandled update");
+        .default_handler(move |update| {
+            let bot = unhandled_bot.clone();
+            async move {
+                tracing::trace!(update_id = ?update.id, "unhandled update");
+                // Otherwise the button would spin until Telegram gives up,
+                // e.g. when someone may not use the module it belongs to.
+                if let UpdateKind::CallbackQuery(query) = &update.kind
+                    && let Err(error) = bot
+                        .answer_callback_query(query.id.clone())
+                        .text("🚫 This button isn't available to you")
+                        .await
+                {
+                    tracing::debug!(%error, "failed to answer an unhandled button");
+                }
+            }
         })
         .error_handler(Arc::new(error_reporter))
         .enable_ctrlc_handler()

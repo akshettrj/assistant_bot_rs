@@ -11,18 +11,23 @@ use teloxide::{
 };
 
 use super::{
+    ID,
     driver::LightResult,
     model::{LightState, NAMED_COLORS},
     scenes,
     settings::LightsSettings,
 };
+use crate::modules::settings::settings_button;
 
 pub const CALLBACK_PREFIX: &str = "light:";
 /// Stands for "no light" in callback data, for buttons such as the
 /// schedules'.
 pub const NO_LIGHT: &str = "-";
+/// The words of the button saving the current look as a preset, which asks
+/// for its name.
+pub const SAVE: &str = "save";
 
-const COLOR_BUTTONS: &[(&str, &str)] = &[
+pub(super) const COLOR_BUTTONS: &[(&str, &str)] = &[
     ("red", "🔴"),
     ("orange", "🟠"),
     ("yellow", "🟡"),
@@ -187,6 +192,11 @@ pub fn keyboard(
         );
     }
 
+    rows.push(
+        std::iter::once(button("💾 Save as preset", SAVE))
+            .chain(settings_button(ID))
+            .collect(),
+    );
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -243,10 +253,32 @@ mod tests {
 
         for data in data {
             assert!(data.len() <= 64, "{data} is too long for Telegram");
-            let (light, words) = parse_callback(&data).unwrap();
+            // The settings button belongs to the settings module.
+            let Some((light, words)) = parse_callback(&data) else {
+                assert!(data.starts_with("cfg:"), "{data}");
+                continue;
+            };
             assert_eq!(light, "bedroom");
+            // Saving asks for a name first.
+            if words == SAVE {
+                continue;
+            }
             command::parse(words, &settings).unwrap_or_else(|error| panic!("{data}: {error}"));
         }
+    }
+
+    #[test]
+    fn the_panel_saves_presets_and_links_to_the_settings() {
+        let markup = keyboard("bedroom", &state(true), &settings());
+        let last: Vec<_> = markup
+            .inline_keyboard
+            .last()
+            .unwrap()
+            .iter()
+            .map(|button| button.text.as_str())
+            .collect();
+        assert_eq!(last, ["💾 Save as preset", "⚙️ Settings"]);
+        assert!(callbacks(&markup).contains(&"light:bedroom:save".into()));
     }
 
     #[test]
