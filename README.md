@@ -124,6 +124,55 @@ Updates a user may not handle are silently ignored. `/help` and Telegram's
 command menu only show what the user can use, and are refreshed when the
 settings change.
 
+## Built-in modules
+
+| Module     | Commands                 | Access           |
+| ---------- | ------------------------ | ---------------- |
+| `general`  | `/start`, `/help`, `/id` | everyone         |
+| `lights`   | `/light`                 | restricted       |
+| `settings` | `/config`                | owner only       |
+
+### Lights
+
+`/light` controls Tuya Wi-Fi bulbs (Wipro's smart bulbs are Tuya devices)
+directly over the LAN, with no cloud involved at runtime. `/light` alone shows a
+control panel with buttons for power, brightness, warm/neutral/cool white,
+colours and your presets. Every button is also a text command:
+
+```
+/light on | off | toggle
+/light brightness 40 | +10 | -10
+/light temp warm | neutral | cool | 0–100 | 4000k
+/light color red | #ff8800
+/light reading                 apply the `reading` preset
+/light desk off                with several lights, name one first
+```
+
+Setup, once per bulb:
+
+1. **Pair the bulb in the Smart Life (or Tuya Smart) app.** Branded apps such as
+   Wipro Next can't hand out the key, so re-pair the bulb in Smart Life if
+   needed: switch it off and on 3 times until it blinks quickly, then use
+   **+ → Add Device** in Smart Life.
+2. **Fetch its id and local key**: `nix run .#tuya-local-key -- <user code> >
+   tuya-devices.json`. Scan the QR code from inside Smart Life (**+ → Scan**).
+   The user code is under Me → Settings → Account and Security.
+   `tuya-devices.json` holds the keys and is git-ignored.
+3. **Add the bulb** under `[modules.lights.devices.<name>]` (see
+   `config.example.toml`). Set its `address` (and ideally reserve it in your
+   router), or open UDP 6666, 6667 and 7000 so it can be discovered.
+4. Grant access: `/config add telegram.allowed_users.lights <user id>`.
+
+Presets are runtime settings:
+
+```
+/config set modules.lights.presets.movie {"brightness": 20, "color": "purple"}
+```
+
+The Tuya protocol is handled by [rustuya](https://crates.io/crates/rustuya)
+behind a small driver trait (`modules::lights::driver`), so other kinds of
+lights can be added without touching the commands or the panel.
+
 ## Architecture
 
 ```
@@ -139,6 +188,7 @@ src/
 │                             command menus
 ├── modules/                  Module trait, registry, built-in modules
 │   ├── general.rs            /start, /help, /id
+│   ├── lights/               /light: Tuya bulbs over the LAN
 │   └── settings.rs           /config
 └── db/                       connection, entities, repositories
 migration/                    SeaORM migrations (workspace member)

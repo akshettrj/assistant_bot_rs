@@ -51,3 +51,27 @@ disabled = []
 [modules.general]
 # Runtime. Custom /start greeting; {name} is replaced with the user's first name.
 # start_message = "Hi {name}!"
+
+# Smart lights (/light): Tuya Wi-Fi bulbs such as Wipro's, controlled over the
+# LAN. Get each light's id and local key with `nix run .#tuya-local-key`.
+[modules.lights]
+# Runtime. The light used when a command names none (optional with one light).
+# default = "bedroom"
+
+[modules.lights.devices.bedroom]
+id = "your-device-id"
+# Prefer ASSISTANT_MODULES__LIGHTS__DEVICES__BEDROOM__LOCAL_KEY.
+local_key = "0123456789abcdef"
+# Optional: discovered from the bulb's broadcasts if unset (needs UDP 6666,
+# 6667 and 7000 open). A DHCP reservation for the bulb makes this reliable.
+address = "192.168.1.50"
+# Optional: the Tuya protocol version, detected if unset.
+version = "3.5"
+# Optional: the data point layout (auto | v1 | v2), detected if unset.
+# layout = "auto"
+
+# Runtime. Presets, shown as buttons on the panel and usable as /light <name>.
+[modules.lights.presets]
+reading = { brightness = 90, temperature = "neutral" }
+night = { brightness = 5, temperature = "warm" }
+relax = { brightness = 40, color = "orange" }
