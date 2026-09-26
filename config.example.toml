@@ -1,0 +1,48 @@
+# Copy to `config.toml` and fill in.
+#
+# Every key can be overridden by an environment variable: `ASSISTANT_` + the
+# key path in upper case, with `__` between levels, e.g.
+# `ASSISTANT_TELEGRAM__BOT_TOKEN`.
+#
+# Keys marked "runtime" can also be changed from Telegram with /config (owner
+# only). Those changes are stored in the database and win over this file;
+# `/config unset <key>` goes back to the value here.
+
+[telegram]
+# From @BotFather. Prefer the ASSISTANT_TELEGRAM__BOT_TOKEN env var.
+bot_token = "123456:ABC-DEF..."
+# For a self-hosted Bot API server; defaults to https://api.telegram.org.
+# bot_api_url = "http://localhost:8081"
+# Your own user id (send /id to the bot to find it).
+owner_id = 123456789
+# Runtime. Where handler errors are reported (the bot must be able to post there).
+error_logs_chat_id = -1001234567890
+# Runtime. Users who can use every module.
+sudo_users_id = []
+
+# Runtime. Users allowed to use a module, per module id.
+[telegram.allowed_users]
+# some_module = [111111111]
+
+# Runtime. Chats whose members may use a module, per module id.
+[telegram.allowed_chats]
+# some_module = [-1009876543210]
+
+[database]
+# SQLite (`mode=rwc` creates the file) or `postgres://user:pass@host/db`.
+url = "sqlite://assistant_bot.sqlite?mode=rwc"
+run_migrations = true
+# max_connections = 10
+# min_connections = 1
+connect_timeout_secs = 10
+sqlx_logging = false
+
+[logging]
+# Runtime. tracing-subscriber EnvFilter syntax; RUST_LOG takes precedence at startup.
+filter = "info,assistant_bot_rs=debug"
+# full | compact | pretty
+format = "full"
+
+[modules]
+# Runtime. Ids of the modules that are turned off.
+disabled = []
