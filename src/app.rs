@@ -4,12 +4,12 @@ use anyhow::Context as _;
 
 use crate::{
     bot,
-    cli::{Cli, Command},
+    cli::{self, Cli, Command},
     config::AssistantConfig,
     context::AppContext,
     db, modules,
     modules::ModuleRegistry,
-    settings::SettingsStore,
+    settings::{SettingsStore, command},
     telemetry,
 };
 
@@ -45,14 +45,22 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 .await
                 .context("failed to apply the migrations")
         }
-        Command::Run => {
-            let db = connect(&config).await?;
-            if config.database.run_migrations {
-                db::migrate(&db)
-                    .await
-                    .context("failed to apply the migrations")?;
-            }
+        Command::Settings(action) => {
+            let db = connect_and_migrate(&config).await?;
+            // No log filter handle: changes are for the bot, not this process.
+            let settings = SettingsStore::load(base, db, &registry, None)
+                .await
+                .context("failed to load the runtime settings")?;
 
+            let outcome = command::execute(&settings, &registry, action.into(), None).await?;
+            println!("{}", cli::render_settings_outcome(&outcome));
+            if outcome.change().is_some() {
+                eprintln!("note: a running bot applies this after `/config reload` or a restart");
+            }
+            Ok(())
+        }
+        Command::Run => {
+            let db = connect_and_migrate(&config).await?;
             let settings = SettingsStore::load(base, db.clone(), &registry, Some(log_filter))
                 .await
                 .context("failed to load the runtime settings")?;
@@ -67,4 +75,17 @@ async fn connect(config: &AssistantConfig) -> anyhow::Result<sea_orm::DatabaseCo
     db::connect(&config.database)
         .await
         .context("failed to connect to the database")
+}
+
+/// Connects, then applies the pending migrations unless disabled.
+async fn connect_and_migrate(
+    config: &AssistantConfig,
+) -> anyhow::Result<sea_orm::DatabaseConnection> {
+    let db = connect(config).await?;
+    if config.database.run_migrations {
+        db::migrate(&db)
+            .await
+            .context("failed to apply the migrations")?;
+    }
+    Ok(db)
 }

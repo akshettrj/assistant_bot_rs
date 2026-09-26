@@ -1,16 +1,20 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 /// The module-specific settings.
 ///
-/// Settings owned by a single module should be added here as a field named
-/// after the module id (with `#[serde(default)]`), so that everything stays
-/// type-checked at load time.
+/// Besides `disabled`, every key is the settings section of one module
+/// (`[modules.<id>]`). Sections are validated by the modules that declare them
+/// (see [`ModuleSettings`](crate::settings::ModuleSettings)); a section that
+/// matches no module is rejected, which also catches typos in this table.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ModulesConfig {
-    /// Ids of the modules that should not be loaded.
+    /// Ids of the modules that are turned off.
     #[serde(default)]
     pub disabled: BTreeSet<String>,
+
+    /// The raw settings sections, by module id.
+    #[serde(flatten)]
+    pub sections: BTreeMap<String, serde_json::Value>,
 }

@@ -1,18 +1,20 @@
 //! Runtime settings: configuration overrides stored in the database and
-//! editable from Telegram.
+//! editable from Telegram (`/config`) or the CLI (`settings`).
 //!
 //! The effective configuration is built by layering, from the lowest to the
 //! highest priority:
 //! 1. the config file;
 //! 2. the `ASSISTANT_*` environment variables;
-//! 3. the overrides of the `settings` table, for the keys listed in
-//!    [`keys::RUNTIME_SETTINGS`].
+//! 3. the overrides of the `settings` table, for the keys of the [`Catalog`]:
+//!    the core ones and the ones modules declare with [`ModuleSettings`].
 //!
 //! Every change goes through the same deserialization and validation as the
 //! config file, then atomically replaces the [`Snapshot`] that handlers read,
 //! so it applies immediately.
 
+pub mod command;
 pub mod keys;
+mod module;
 mod provider;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -24,15 +26,16 @@ use serde_json::Value;
 use teloxide::types::UserId;
 use tokio::sync::Mutex;
 
+pub use self::module::{ModuleSettings, ParsedSettings};
 use self::{
-    keys::{RuntimeSetting, UnknownKey},
+    keys::{Catalog, UnknownKey},
     provider::Override,
 };
 use crate::{
     access::AccessControl,
     config::{AssistantConfig, ConfigError},
     db::repositories::settings as repo,
-    modules::ModuleRegistry,
+    modules::{ModuleRegistry, ModuleSettingsMap},
     telemetry::LogFilterHandle,
 };
 
@@ -82,6 +85,8 @@ impl std::fmt::Display for Source {
 pub struct Snapshot {
     pub config: AssistantConfig,
     pub access: AccessControl,
+    /// The parsed `[modules.<id>]` sections.
+    module_settings: ModuleSettingsMap,
     /// The overrides in effect, by key.
     overrides: BTreeMap<String, Value>,
     /// Stored overrides that are not applied because they are invalid (e.g.
@@ -95,6 +100,13 @@ impl Snapshot {
         !self.config.modules.disabled.contains(module_id)
     }
 
+    /// The settings of a module, as the type it declared with
+    /// [`ModuleSettings::of`]. `None` if the module declares no settings or
+    /// `T` is not their type.
+    pub fn module_settings<T: 'static>(&self, module_id: &str) -> Option<&T> {
+        self.module_settings.get(module_id)?.typed()
+    }
+
     pub fn overrides(&self) -> &BTreeMap<String, Value> {
         &self.overrides
     }
@@ -105,9 +117,16 @@ impl Snapshot {
 
     /// The effective value of a (dotted) key, defaults included.
     pub fn value(&self, key: &str) -> Option<Value> {
+        // Module sections: from the parsed settings, which include defaults.
+        if let Some(rest) = key.strip_prefix("modules.") {
+            let (id, field) = rest.split_once('.').unwrap_or((rest, ""));
+            if let Some(parsed) = self.module_settings.get(id) {
+                return parsed.json().pointer(&to_pointer(field)).cloned();
+            }
+        }
+
         let config = serde_json::to_value(&self.config).ok()?;
-        let pointer = format!("/{}", key.replace('.', "/"));
-        config.pointer(&pointer).cloned()
+        config.pointer(&to_pointer(key)).cloned()
     }
 
     /// Where the effective value of a key comes from.
@@ -128,6 +147,15 @@ impl Snapshot {
     }
 }
 
+/// `a.b` -> `/a/b`, `` -> `` (the whole document).
+fn to_pointer(key: &str) -> String {
+    if key.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", key.replace('.', "/"))
+    }
+}
+
 /// The result of a successful change.
 #[derive(Debug)]
 pub struct Change {
@@ -140,6 +168,7 @@ pub struct Change {
 pub struct SettingsStore {
     base: Figment,
     db: DatabaseConnection,
+    catalog: Catalog,
     current: ArcSwap<Snapshot>,
     /// Serialises the read-modify-write cycles of the changes.
     write_lock: Mutex<()>,
@@ -158,37 +187,8 @@ impl SettingsStore {
         registry: &ModuleRegistry,
         log_filter: Option<LogFilterHandle>,
     ) -> Result<Self, SettingsError> {
-        let mut snapshot = build(&base, BTreeMap::new(), BTreeMap::new(), registry)
-            .map_err(SettingsError::InvalidBase)?;
-
-        for row in repo::all(&db).await? {
-            let reason = match serde_json::from_str::<Value>(&row.value) {
-                Err(error) => format!("the stored value is not valid JSON: {error}"),
-                Ok(value) => match keys::resolve(&row.key) {
-                    Err(error) => error.to_string(),
-                    Ok(_) => {
-                        let mut overrides = snapshot.overrides.clone();
-                        overrides.insert(row.key.clone(), value);
-                        match build(&base, overrides, snapshot.ignored.clone(), registry) {
-                            Ok(next) => {
-                                snapshot = next;
-                                continue;
-                            }
-                            Err(error) => error.to_string(),
-                        }
-                    }
-                },
-            };
-
-            tracing::warn!(key = row.key, reason, "ignoring an invalid runtime setting");
-            snapshot.ignored.insert(row.key, reason);
-        }
-
-        tracing::info!(
-            overrides = snapshot.overrides.len(),
-            ignored = snapshot.ignored.len(),
-            "runtime settings loaded"
-        );
+        let catalog = Catalog::new(registry);
+        let snapshot = load_snapshot(&base, &db, &catalog, registry).await?;
 
         if let Some(handle) = &log_filter
             && !handle.is_pinned_by_env()
@@ -201,6 +201,7 @@ impl SettingsStore {
         Ok(Self {
             base,
             db,
+            catalog,
             current: ArcSwap::from_pointee(snapshot),
             write_lock: Mutex::new(()),
             log_filter,
@@ -211,6 +212,20 @@ impl SettingsStore {
     /// duration of one operation so that changes are picked up.
     pub fn current(&self) -> Arc<Snapshot> {
         self.current.load_full()
+    }
+
+    /// The keys that can be changed at runtime.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Rebuilds the configuration from the config file, the environment and
+    /// the database, e.g. after the CLI changed the stored settings. Settings
+    /// needed at startup (token, database, ...) still require a restart.
+    pub async fn reload(&self, registry: &ModuleRegistry) -> Result<Change, SettingsError> {
+        let _guard = self.write_lock.lock().await;
+        let snapshot = load_snapshot(&self.base, &self.db, &self.catalog, registry).await?;
+        Ok(self.publish(snapshot))
     }
 
     /// Overrides `key` with `value`, replacing the overrides of its entries.
@@ -306,7 +321,7 @@ impl SettingsStore {
         registry: &ModuleRegistry,
         new_value: impl FnOnce(Option<Value>) -> Result<Value, SettingsError>,
     ) -> Result<Change, SettingsError> {
-        keys::resolve(key)?;
+        self.catalog.resolve(key)?;
 
         let _guard = self.write_lock.lock().await;
         let previous = self.current();
@@ -361,11 +376,6 @@ impl SettingsStore {
     }
 }
 
-/// Every runtime setting, for listing.
-pub fn runtime_settings() -> &'static [RuntimeSetting] {
-    keys::RUNTIME_SETTINGS
-}
-
 /// Parses a value typed by a user: JSON if it is valid JSON (`42`, `[1, 2]`,
 /// `"text"`, `true`), a plain string otherwise (`info,sqlx=warn`).
 pub fn parse_value(raw: &str) -> Value {
@@ -379,6 +389,48 @@ fn as_list(key: &str, value: Option<Value>) -> Result<Vec<Value>, SettingsError>
         Some(Value::Array(items)) => Ok(items),
         Some(_) => Err(SettingsError::NotAList(key.to_string())),
     }
+}
+
+/// The base configuration with every valid stored override applied, one at a
+/// time so that an invalid one is skipped without affecting the others.
+async fn load_snapshot(
+    base: &Figment,
+    db: &DatabaseConnection,
+    catalog: &Catalog,
+    registry: &ModuleRegistry,
+) -> Result<Snapshot, SettingsError> {
+    let mut snapshot = build(base, BTreeMap::new(), BTreeMap::new(), registry)
+        .map_err(SettingsError::InvalidBase)?;
+
+    for row in repo::all(db).await? {
+        let reason = match serde_json::from_str::<Value>(&row.value) {
+            Err(error) => format!("the stored value is not valid JSON: {error}"),
+            Ok(value) => match catalog.resolve(&row.key) {
+                Err(error) => error.to_string(),
+                Ok(_) => {
+                    let mut overrides = snapshot.overrides.clone();
+                    overrides.insert(row.key.clone(), value);
+                    match build(base, overrides, snapshot.ignored.clone(), registry) {
+                        Ok(next) => {
+                            snapshot = next;
+                            continue;
+                        }
+                        Err(error) => error.to_string(),
+                    }
+                }
+            },
+        };
+
+        tracing::warn!(key = row.key, reason, "ignoring an invalid runtime setting");
+        snapshot.ignored.insert(row.key, reason);
+    }
+
+    tracing::info!(
+        overrides = snapshot.overrides.len(),
+        ignored = snapshot.ignored.len(),
+        "runtime settings loaded"
+    );
+    Ok(snapshot)
 }
 
 /// Layers the overrides on `base` and validates the result.
@@ -399,13 +451,14 @@ fn build(
         });
 
     let config = AssistantConfig::from_figment(&figment)?;
-    registry
+    let module_settings = registry
         .validate_config(&config)
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
 
     Ok(Snapshot {
         access: AccessControl::from_config(&config.telegram),
         config,
+        module_settings,
         overrides,
         ignored,
         figment,
@@ -420,7 +473,7 @@ mod tests {
     use super::*;
     use crate::{
         db::test_support::memory_db,
-        modules::builtin,
+        modules::{builtin, general::GeneralSettings},
         test_support::{BASE_CONFIG, figment_from_toml},
     };
 
@@ -503,6 +556,7 @@ mod tests {
             ("modules.disabled", json!(["no_such_module"])),
             ("modules.disabled", json!(["settings"])),
             ("telegram.allowed_users.no_such_module", json!([1])),
+            ("modules.general.start_message", json!(42)),
         ];
         for (key, value) in cases {
             let err = store
@@ -515,14 +569,65 @@ mod tests {
             );
         }
 
-        let err = store
-            .set("telegram.owner_id", json!(2), None, &registry)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, SettingsError::UnknownKey(_)), "{err}");
+        for key in ["telegram.owner_id", "modules.general.nope"] {
+            let err = store.set(key, json!(2), None, &registry).await.unwrap_err();
+            assert!(matches!(err, SettingsError::UnknownKey(_)), "{err}");
+        }
 
         assert!(store.current().overrides().is_empty());
         assert!(repo::all(&db).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn module_settings_are_typed_and_editable() {
+        let registry = registry();
+        let store = store_with(memory_db().await, &registry).await;
+        let start_message = |store: &SettingsStore| {
+            store
+                .current()
+                .module_settings::<GeneralSettings>("general")
+                .expect("general declares its settings")
+                .start_message
+                .clone()
+        };
+
+        assert_eq!(start_message(&store), None);
+        assert_eq!(
+            store.current().value("modules.general.start_message"),
+            Some(Value::Null)
+        );
+        assert_eq!(
+            store.current().source("modules.general.start_message"),
+            Source::Default
+        );
+
+        store
+            .set(
+                "modules.general.start_message",
+                json!("Hey {name}"),
+                None,
+                &registry,
+            )
+            .await
+            .unwrap();
+        assert_eq!(start_message(&store).as_deref(), Some("Hey {name}"));
+        assert_eq!(
+            store.current().source("modules.general.start_message"),
+            Source::Database
+        );
+        assert!(
+            store
+                .current()
+                .module_settings::<String>("general")
+                .is_none(),
+            "wrong type"
+        );
+
+        store
+            .unset("modules.general.start_message", &registry)
+            .await
+            .unwrap();
+        assert_eq!(start_message(&store), None);
     }
 
     #[tokio::test]
@@ -693,6 +798,24 @@ mod tests {
             .unwrap();
         assert!(!store.current().ignored().contains_key("modules.disabled"));
         assert_eq!(repo::all(&db).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_changes_made_elsewhere() {
+        let registry = registry();
+        let db = memory_db().await;
+        let bot = store_with(db.clone(), &registry).await;
+        // E.g. the `settings` CLI command, in another process.
+        let cli = store_with(db, &registry).await;
+
+        cli.set("telegram.sudo_users_id", json!([7]), None, &registry)
+            .await
+            .unwrap();
+        assert!(!bot.current().access.is_sudo(UserId(7)));
+
+        let change = bot.reload(&registry).await.unwrap();
+        assert!(!change.previous.access.is_sudo(UserId(7)));
+        assert!(bot.current().access.is_sudo(UserId(7)));
     }
 
     #[test]

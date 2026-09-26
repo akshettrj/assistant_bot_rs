@@ -7,13 +7,13 @@
 //! To add a module:
 //! 1. create `src/modules/<id>.rs` (or a directory) implementing [`Module`];
 //! 2. register it in [`builtin`];
-//! 3. if it needs settings, add a `<id>` field to
-//!    [`ModulesConfig`](crate::config::ModulesConfig), and list the keys that
-//!    may change at runtime in
-//!    [`RUNTIME_SETTINGS`](crate::settings::keys::RUNTIME_SETTINGS).
+//! 3. if it needs settings, declare them with [`Module::settings`]: a typed
+//!    struct for its `[modules.<id>]` section, and the keys that may change at
+//!    runtime.
 //!
-//! Read the configuration through `ctx.settings.current()` rather than
-//! caching it, so that runtime changes are picked up.
+//! Read the configuration through `ctx.settings.current()` (and
+//! [`Snapshot::module_settings`](crate::settings::Snapshot::module_settings))
+//! rather than caching it, so that runtime changes are picked up.
 
 pub mod general;
 mod registry;
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use teloxide::types::BotCommand;
 
 pub use self::registry::*;
-use crate::access::AccessPolicy;
+use crate::{access::AccessPolicy, settings::ModuleSettings};
 
 /// The result of every update handler.
 pub type HandlerResult = anyhow::Result<()>;
@@ -59,6 +59,11 @@ pub trait Module: Send + Sync + 'static {
     /// disabling it would make it impossible to enable it back.
     fn always_enabled(&self) -> bool {
         false
+    }
+
+    /// The module's settings section, `[modules.<id>]`, if it has one.
+    fn settings(&self) -> Option<ModuleSettings> {
+        None
     }
 
     /// The handler tree of the module.

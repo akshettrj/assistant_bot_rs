@@ -30,7 +30,8 @@ impl LogFilterHandle {
     }
 }
 
-/// Installs the global subscriber. `RUST_LOG` overrides `logging.filter`.
+/// Installs the global subscriber, writing to stderr (stdout is left to the
+/// CLI's output). `RUST_LOG` overrides `logging.filter`.
 pub fn init(config: &LoggingConfig) -> anyhow::Result<LogFilterHandle> {
     let (filter, pinned_by_env) = match EnvFilter::try_from_default_env() {
         Ok(filter) => (filter, true),
@@ -43,9 +44,17 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<LogFilterHandle> {
     let (filter, handle) = reload::Layer::new(filter);
 
     let output = match config.format {
-        LogFormat::Full => tracing_subscriber::fmt::layer().boxed(),
-        LogFormat::Compact => tracing_subscriber::fmt::layer().compact().boxed(),
-        LogFormat::Pretty => tracing_subscriber::fmt::layer().pretty().boxed(),
+        LogFormat::Full => tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .boxed(),
+        LogFormat::Compact => tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .compact()
+            .boxed(),
+        LogFormat::Pretty => tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .pretty()
+            .boxed(),
     };
 
     tracing_subscriber::registry()

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use teloxide::{
     prelude::*,
     types::{Me, ParseMode, ReplyParameters, User},
@@ -16,7 +17,24 @@ use crate::{
     bot::AssistantBot,
     context::AppContext,
     modules::{HandlerResult, Module, ModuleInfo, RegisteredModule, UpdateHandler},
+    settings::{ModuleSettings, keys::RuntimeSetting},
 };
+
+pub const ID: &str = "general";
+
+/// `[modules.general]`
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeneralSettings {
+    /// Replaces the `/start` greeting; `{name}` is replaced with the user's
+    /// first name.
+    pub start_message: Option<String>,
+}
+
+const RUNTIME_SETTINGS: &[RuntimeSetting] = &[RuntimeSetting::new(
+    "start_message",
+    "Custom /start greeting; {name} is replaced with the user's first name",
+)];
 
 #[derive(BotCommands, Clone, Debug, PartialEq, Eq)]
 #[command(rename_rule = "lowercase")]
@@ -34,7 +52,7 @@ pub struct GeneralModule;
 impl Module for GeneralModule {
     fn info(&self) -> ModuleInfo {
         ModuleInfo {
-            id: "general",
+            id: ID,
             name: "General",
             description: "Basic commands of the assistant",
             access: AccessPolicy::Public,
@@ -43,6 +61,10 @@ impl Module for GeneralModule {
 
     fn commands(&self) -> Vec<teloxide::types::BotCommand> {
         Command::bot_commands()
+    }
+
+    fn settings(&self) -> Option<ModuleSettings> {
+        Some(ModuleSettings::of::<GeneralSettings>(RUNTIME_SETTINGS))
     }
 
     fn handler(&self) -> UpdateHandler {
@@ -59,11 +81,16 @@ async fn handle(
     command: Command,
     ctx: Arc<AppContext>,
 ) -> HandlerResult {
+    let settings = ctx.settings.current();
     let text = match command {
-        Command::Start => start_text(&me, msg.from.as_ref()),
+        Command::Start => {
+            let custom = settings
+                .module_settings::<GeneralSettings>(ID)
+                .and_then(|general| general.start_message.as_deref());
+            start_text(&me.first_name, msg.from.as_ref(), custom)
+        }
         Command::Help => {
             let user = msg.from.as_ref().map(|user| user.id);
-            let settings = ctx.settings.current();
             help_text(ctx.modules.accessible(&settings, user, Some(msg.chat.id)))
         }
         Command::Id => id_text(&msg),
@@ -76,12 +103,16 @@ async fn handle(
     Ok(())
 }
 
-fn start_text(me: &Me, from: Option<&User>) -> String {
+fn start_text(bot_name: &str, from: Option<&User>, custom: Option<&str>) -> String {
     let name = from.map_or_else(|| "there".to_string(), |user| escape(&user.first_name));
-    format!(
-        "Hi {name}! I'm {}, a personal assistant.\nSend /help to see what I can do for you.",
-        bold(&escape(&me.first_name)),
-    )
+    match custom {
+        // Escaped first, so that the message is shown as typed.
+        Some(template) => escape(template).replace("{name}", &name),
+        None => format!(
+            "Hi {name}! I'm {}, a personal assistant.\nSend /help to see what I can do for you.",
+            bold(&escape(bot_name)),
+        ),
+    }
 }
 
 fn help_text<'a>(modules: impl Iterator<Item = &'a RegisteredModule>) -> String {
@@ -185,6 +216,33 @@ mod tests {
             help_text(std::iter::empty()),
             "There are no commands available to you here."
         );
+    }
+
+    fn user(first_name: &str) -> User {
+        User {
+            id: UserId(1),
+            is_bot: false,
+            first_name: first_name.to_string(),
+            last_name: None,
+            username: None,
+            language_code: None,
+            is_premium: false,
+            added_to_attachment_menu: false,
+        }
+    }
+
+    #[test]
+    fn start_greets_by_name() {
+        let text = start_text("Bot", Some(&user("A<b>")), None);
+        assert!(text.starts_with("Hi A&lt;b&gt;!"), "{text}");
+        assert!(text.contains("<b>Bot</b>"), "{text}");
+        assert!(start_text("Bot", None, None).starts_with("Hi there!"));
+    }
+
+    #[test]
+    fn custom_start_message_is_escaped_and_filled_in() {
+        let text = start_text("Bot", Some(&user("Ann")), Some("<i>Yo</i> {name}, {name}!"));
+        assert_eq!(text, "&lt;i&gt;Yo&lt;/i&gt; Ann, Ann!");
     }
 
     #[test]

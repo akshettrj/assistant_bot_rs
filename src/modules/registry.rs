@@ -14,8 +14,11 @@ use crate::{
     config::AssistantConfig,
     context::AppContext,
     modules::{Module, ModuleInfo, UpdateHandler},
-    settings::Snapshot,
+    settings::{ModuleSettings, ParsedSettings, Snapshot},
 };
+
+/// The validated settings sections, by module id.
+pub type ModuleSettingsMap = HashMap<&'static str, ParsedSettings>;
 
 /// Errors caught while loading the modules or validating the configuration
 /// against them.
@@ -43,6 +46,21 @@ pub enum RegistryError {
 
     #[error("the `{0}` module cannot be disabled")]
     CannotDisable(&'static str),
+
+    #[error("invalid settings for the `{module}` module (`[modules.{module}]`): {reason}")]
+    InvalidModuleSettings {
+        module: &'static str,
+        reason: String,
+    },
+
+    #[error("runtime setting `{key}` of the `{module}` module is not one of its settings")]
+    UnknownRuntimeKey {
+        module: &'static str,
+        key: &'static str,
+    },
+
+    #[error("`[modules.{0}]` does not match any module with settings")]
+    UnknownSection(String),
 }
 
 /// A module along with its (cached) metadata.
@@ -50,6 +68,7 @@ pub struct RegisteredModule {
     pub info: ModuleInfo,
     pub commands: Vec<BotCommand>,
     pub always_enabled: bool,
+    pub settings: Option<ModuleSettings>,
     module: Arc<dyn Module>,
 }
 
@@ -59,6 +78,7 @@ impl fmt::Debug for RegisteredModule {
             .field("info", &self.info)
             .field("commands", &self.commands)
             .field("always_enabled", &self.always_enabled)
+            .field("settings", &self.settings)
             .finish_non_exhaustive()
     }
 }
@@ -69,6 +89,7 @@ impl RegisteredModule {
             info: module.info(),
             commands: module.commands(),
             always_enabled: module.always_enabled(),
+            settings: module.settings(),
             module,
         }
     }
@@ -82,7 +103,8 @@ pub struct ModuleRegistry {
 }
 
 impl ModuleRegistry {
-    /// Checks that the modules' ids and commands do not clash.
+    /// Checks that the modules' ids and commands do not clash, and that their
+    /// settings declarations are consistent.
     ///
     /// Commands must be unique across all modules, disabled ones included,
     /// since those can be enabled at runtime.
@@ -101,6 +123,9 @@ impl ModuleRegistry {
         }
 
         check_commands(&modules)?;
+        for module in &modules {
+            check_settings_declaration(module)?;
+        }
         Ok(Self { modules })
     }
 
@@ -143,9 +168,15 @@ impl ModuleRegistry {
         })
     }
 
+    /// Checks the config against the modules and returns their parsed
+    /// settings sections.
+    ///
     /// Module ids in the config must exist, otherwise a typo would silently
     /// deny access (or fail to disable a module).
-    pub fn validate_config(&self, config: &AssistantConfig) -> Result<(), RegistryError> {
+    pub fn validate_config(
+        &self,
+        config: &AssistantConfig,
+    ) -> Result<ModuleSettingsMap, RegistryError> {
         let references = [
             (
                 "modules.disabled",
@@ -178,7 +209,30 @@ impl ModuleRegistry {
             return Err(RegistryError::CannotDisable(module.info.id));
         }
 
-        Ok(())
+        self.parse_module_settings(config)
+    }
+
+    fn parse_module_settings(
+        &self,
+        config: &AssistantConfig,
+    ) -> Result<ModuleSettingsMap, RegistryError> {
+        let sections = &config.modules.sections;
+        if let Some(id) = sections
+            .keys()
+            .find(|id| self.get(id).is_none_or(|module| module.settings.is_none()))
+        {
+            return Err(RegistryError::UnknownSection(id.clone()));
+        }
+
+        self.iter()
+            .filter_map(|module| Some((module.info.id, module.settings?)))
+            .map(|(id, settings)| {
+                let parsed = settings.parse(sections.get(id)).map_err(|reason| {
+                    RegistryError::InvalidModuleSettings { module: id, reason }
+                })?;
+                Ok((id, parsed))
+            })
+            .collect()
     }
 
     /// Settings that are valid but have no effect.
@@ -237,6 +291,31 @@ fn is_valid_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// A module's defaults must be valid, and its runtime keys must be its own
+/// settings, unique.
+fn check_settings_declaration(module: &RegisteredModule) -> Result<(), RegistryError> {
+    let Some(settings) = module.settings else {
+        return Ok(());
+    };
+    let id = module.info.id;
+
+    let defaults = settings
+        .parse(None)
+        .map_err(|reason| RegistryError::InvalidModuleSettings { module: id, reason })?;
+
+    let mut seen = HashSet::new();
+    for setting in settings.runtime {
+        let pointer = format!("/{}", setting.key.replace('.', "/"));
+        if defaults.json().pointer(&pointer).is_none() || !seen.insert(setting.key) {
+            return Err(RegistryError::UnknownRuntimeKey {
+                module: id,
+                key: setting.key,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Two modules declaring the same command would make one of them unreachable.
 fn check_commands(modules: &[RegisteredModule]) -> Result<(), RegistryError> {
     let mut owners = HashMap::new();
@@ -263,7 +342,10 @@ pub(crate) mod tests {
     use teloxide::{dptree::deps, utils::command::BotCommands};
 
     use super::*;
-    use crate::test_support::{config_from_toml, context};
+    use crate::{
+        settings::keys::RuntimeSetting,
+        test_support::{config_from_toml, context},
+    };
 
     const CONFIG: &str = r#"
 [telegram]
@@ -328,6 +410,85 @@ allowed_users = { restricted = [3] }
 
         fn handler(&self) -> UpdateHandler {
             dptree::endpoint(|| async { Ok(()) })
+        }
+    }
+
+    #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct StubSettings {
+        limit: u32,
+    }
+
+    /// A module with a settings section.
+    struct WithSettings(ModuleSettings);
+
+    impl Module for WithSettings {
+        fn info(&self) -> ModuleInfo {
+            ModuleInfo {
+                id: "stub",
+                name: "Stub",
+                description: "test",
+                access: AccessPolicy::Public,
+            }
+        }
+
+        fn settings(&self) -> Option<ModuleSettings> {
+            Some(self.0)
+        }
+
+        fn handler(&self) -> UpdateHandler {
+            dptree::endpoint(|| async { Ok(()) })
+        }
+    }
+
+    fn with_settings(runtime: &'static [RuntimeSetting]) -> Arc<dyn Module> {
+        Arc::new(WithSettings(ModuleSettings::of::<StubSettings>(runtime)))
+    }
+
+    #[test]
+    fn module_sections_are_validated_and_parsed() {
+        let registry = ModuleRegistry::new(vec![
+            TestModule::arc("restricted", AccessPolicy::Restricted),
+            with_settings(&[]),
+        ])
+        .unwrap();
+        let check = |sections: &str| {
+            registry.validate_config(&config_from_toml(&format!("{CONFIG}{sections}")))
+        };
+
+        let parsed = check("").unwrap();
+        assert_eq!(parsed["stub"].typed::<StubSettings>().unwrap().limit, 0);
+
+        let parsed = check("\n[modules.stub]\nlimit = 3\n").unwrap();
+        assert_eq!(parsed["stub"].typed::<StubSettings>().unwrap().limit, 3);
+
+        assert!(matches!(
+            check("\n[modules.stub]\nlimit = \"x\"\n").unwrap_err(),
+            RegistryError::InvalidModuleSettings { module: "stub", .. }
+        ));
+        for section in ["nope", "restricted"] {
+            assert_eq!(
+                check(&format!("\n[modules.{section}]\nx = 1\n")).unwrap_err(),
+                RegistryError::UnknownSection(section.into())
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_keys_must_be_fields_of_the_settings() {
+        const VALID: &[RuntimeSetting] = &[RuntimeSetting::new("limit", "")];
+        const INVALID: &[RuntimeSetting] = &[RuntimeSetting::new("nope", "")];
+        const DUPLICATE: &[RuntimeSetting] = &[
+            RuntimeSetting::new("limit", ""),
+            RuntimeSetting::new("limit", ""),
+        ];
+
+        assert!(ModuleRegistry::new(vec![with_settings(VALID)]).is_ok());
+        for runtime in [INVALID, DUPLICATE] {
+            assert!(matches!(
+                ModuleRegistry::new(vec![with_settings(runtime)]).unwrap_err(),
+                RegistryError::UnknownRuntimeKey { module: "stub", .. }
+            ));
         }
     }
 
