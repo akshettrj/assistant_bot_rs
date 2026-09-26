@@ -444,9 +444,18 @@ fn build(
     let mut ordered: Vec<_> = overrides.iter().collect();
     ordered.sort_by_key(|(key, _)| key.matches('.').count());
 
+    // Figment merges maps key by key, which would mix an overriding map with
+    // the file's. Overwriting the key with a scalar first makes the override
+    // replace it instead.
+    let cleared = Value::Bool(false);
     let figment = ordered
         .into_iter()
         .fold(base.clone(), |figment, (key, value)| {
+            let figment = if value.is_object() {
+                figment.merge(Override::new(key, &cleared))
+            } else {
+                figment
+            };
             figment.merge(Override::new(key, value))
         });
 
@@ -707,6 +716,31 @@ mod tests {
         assert_eq!(
             snapshot.config.telegram.allowed_chats["general"],
             vec![ChatId(-7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn map_overrides_replace_the_files_maps() {
+        let registry = registry();
+        let base = figment_from_toml(&format!(
+            "{BASE_CONFIG}allowed_chats = {{ general = [-5] }}\n"
+        ));
+        let store = SettingsStore::load(base, memory_db().await, &registry, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.current().config.telegram.allowed_chats["general"],
+            vec![ChatId(-5)]
+        );
+
+        store
+            .set("telegram.allowed_chats", json!({}), None, &registry)
+            .await
+            .unwrap();
+        assert!(store.current().config.telegram.allowed_chats.is_empty());
+        assert_eq!(
+            store.current().source("telegram.allowed_chats"),
+            Source::Database
         );
     }
 
