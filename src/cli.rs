@@ -36,6 +36,12 @@ pub enum Command {
     /// `/config reload` (or on its next start).
     #[command(subcommand)]
     Settings(SettingsAction),
+    /// Control the lights, with the same syntax as `/light` (e.g. `light off`,
+    /// `light brightness 40`).
+    Light {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
@@ -233,6 +239,20 @@ mod tests {
         assert_eq!(
             settings_command(&["settings", "unset", "k"]),
             SettingsCommand::Unset("k".into())
+        );
+    }
+
+    #[test]
+    fn light_passes_its_words_through() {
+        assert_eq!(
+            parse(&["light", "brightness", "-10"]).command,
+            Some(Command::Light {
+                args: vec!["brightness".into(), "-10".into()]
+            })
+        );
+        assert_eq!(
+            parse(&["light"]).command,
+            Some(Command::Light { args: vec![] })
         );
     }
 

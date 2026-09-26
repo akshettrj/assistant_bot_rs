@@ -16,6 +16,7 @@
 //! rather than caching it, so that runtime changes are picked up.
 
 pub mod general;
+pub mod lights;
 mod registry;
 pub mod settings;
 
@@ -81,6 +82,7 @@ pub trait Module: Send + Sync + 'static {
 pub fn builtin() -> Vec<Arc<dyn Module>> {
     vec![
         Arc::new(general::GeneralModule),
+        Arc::new(lights::LightsModule::new()),
         Arc::new(settings::SettingsModule),
     ]
 }

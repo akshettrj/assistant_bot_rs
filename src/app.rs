@@ -59,6 +59,25 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Light { args } => {
+            let db = connect_and_migrate(&config).await?;
+            let settings = SettingsStore::load(base, db, &registry, None)
+                .await
+                .context("failed to load the runtime settings")?;
+            let lights = settings
+                .current()
+                .module_settings::<modules::lights::settings::LightsSettings>(modules::lights::ID)
+                .cloned()
+                .unwrap_or_default();
+
+            match modules::lights::run_once(&lights, &args.join(" ")).await {
+                Ok(output) => {
+                    println!("{output}");
+                    Ok(())
+                }
+                Err(error) => anyhow::bail!("{error}"),
+            }
+        }
         Command::Run => {
             let db = connect_and_migrate(&config).await?;
             let settings = SettingsStore::load(base, db.clone(), &registry, Some(log_filter))

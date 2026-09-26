@@ -1,0 +1,224 @@
+//! `[modules.lights]`: the lights and the presets.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use super::model::Preset;
+use crate::{config::Secret, settings::keys::RuntimeSetting};
+
+/// Telegram limits callback data to 64 bytes, which hold the light and the
+/// preset names.
+const MAX_NAME_LEN: usize = 20;
+
+const PROTOCOL_VERSIONS: &[&str] = &["3.1", "3.2", "3.3", "3.4", "3.5"];
+
+pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
+    RuntimeSetting::new(
+        "default",
+        "The light used when a command names none (optional with a single light)",
+    ),
+    RuntimeSetting::per_entry(
+        "presets",
+        "Named presets, e.g. {\"brightness\": 80, \"temperature\": \"warm\"}",
+    ),
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "RawLightsSettings", into = "RawLightsSettings")]
+pub struct LightsSettings {
+    default: Option<String>,
+    devices: BTreeMap<String, DeviceConfig>,
+    presets: BTreeMap<String, Preset>,
+}
+
+impl LightsSettings {
+    pub fn devices(&self) -> &BTreeMap<String, DeviceConfig> {
+        &self.devices
+    }
+
+    pub fn presets(&self) -> &BTreeMap<String, Preset> {
+        &self.presets
+    }
+
+    /// The light a command applies to when it names none.
+    pub fn default_device(&self) -> Option<&str> {
+        match (&self.default, self.devices.len()) {
+            (Some(default), _) => Some(default),
+            (None, 1) => self.devices.keys().next().map(String::as_str),
+            (None, _) => None,
+        }
+    }
+}
+
+/// How to reach one light.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceConfig {
+    /// The Tuya device id.
+    pub id: String,
+    /// The Tuya local key (from `nix run .#tuya-local-key`).
+    pub local_key: Secret<String>,
+    /// The IP address; discovered from the device's broadcasts if unset (the
+    /// firewall must then let UDP 6666, 6667 and 7000 in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// The Tuya protocol version (e.g. "3.5"); detected if unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The data point layout; detected if unset.
+    #[serde(default)]
+    pub layout: Layout,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    #[default]
+    Auto,
+    V1,
+    V2,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawLightsSettings {
+    default: Option<String>,
+    devices: BTreeMap<String, DeviceConfig>,
+    presets: BTreeMap<String, Preset>,
+}
+
+impl TryFrom<RawLightsSettings> for LightsSettings {
+    type Error = String;
+
+    fn try_from(raw: RawLightsSettings) -> Result<Self, Self::Error> {
+        for name in raw.devices.keys().chain(raw.presets.keys()) {
+            validate_name(name)?;
+        }
+
+        for (name, device) in &raw.devices {
+            if device.id.trim().is_empty() || device.local_key.expose().trim().is_empty() {
+                return Err(format!("light `{name}` needs an `id` and a `local_key`"));
+            }
+            if let Some(version) = &device.version
+                && !PROTOCOL_VERSIONS.contains(&version.as_str())
+            {
+                return Err(format!(
+                    "light `{name}`: unknown protocol version `{version}` (expected one of {})",
+                    PROTOCOL_VERSIONS.join(", ")
+                ));
+            }
+        }
+
+        if let Some(default) = &raw.default
+            && !raw.devices.contains_key(default)
+        {
+            return Err(format!("the default light `{default}` is not configured"));
+        }
+
+        for (name, preset) in &raw.presets {
+            preset
+                .validate()
+                .map_err(|error| format!("preset `{name}`: {error}"))?;
+        }
+
+        Ok(Self {
+            default: raw.default,
+            devices: raw.devices,
+            presets: raw.presets,
+        })
+    }
+}
+
+impl From<LightsSettings> for RawLightsSettings {
+    fn from(settings: LightsSettings) -> Self {
+        Self {
+            default: settings.default,
+            devices: settings.devices,
+            presets: settings.presets,
+        }
+    }
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name.len() <= MAX_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{name}` is not a valid name: use up to {MAX_NAME_LEN} lowercase letters, digits, \
+             `-` or `_`"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn parse(value: serde_json::Value) -> Result<LightsSettings, String> {
+        serde_json::from_value(value).map_err(|error| error.to_string())
+    }
+
+    fn device() -> serde_json::Value {
+        json!({ "id": "abc", "local_key": "key" })
+    }
+
+    #[test]
+    fn empty_settings_are_valid() {
+        let settings = parse(json!({})).unwrap();
+        assert!(settings.devices().is_empty());
+        assert_eq!(settings.default_device(), None);
+    }
+
+    #[test]
+    fn a_single_light_is_the_default() {
+        let settings = parse(json!({ "devices": { "bedroom": device() } })).unwrap();
+        assert_eq!(settings.default_device(), Some("bedroom"));
+        assert_eq!(settings.devices()["bedroom"].layout, Layout::Auto);
+
+        let settings = parse(json!({
+            "devices": { "bedroom": device(), "desk": device() },
+        }))
+        .unwrap();
+        assert_eq!(settings.default_device(), None);
+
+        let settings = parse(json!({
+            "default": "desk",
+            "devices": { "bedroom": device(), "desk": device() },
+        }))
+        .unwrap();
+        assert_eq!(settings.default_device(), Some("desk"));
+    }
+
+    #[test]
+    fn invalid_settings_are_rejected() {
+        let cases = [
+            json!({ "devices": { "Bed Room": device() } }),
+            json!({ "devices": { "bedroom": { "id": "", "local_key": "k" } } }),
+            json!({ "devices": { "bedroom": { "id": "a", "local_key": "k", "version": "4.0" } } }),
+            json!({ "devices": { "bedroom": { "id": "a", "local_key": "k", "typo": 1 } } }),
+            json!({ "default": "nope", "devices": { "bedroom": device() } }),
+            json!({ "presets": { "reading": {} } }),
+            json!({ "presets": { "a-very-long-preset-name-indeed": { "brightness": 5 } } }),
+            json!({ "typo": 1 }),
+        ];
+        for case in cases {
+            assert!(parse(case.clone()).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn local_keys_stay_out_of_debug_output() {
+        let settings =
+            parse(json!({ "devices": { "bedroom": { "id": "a", "local_key": "s3cret" } } }))
+                .unwrap();
+        assert!(!format!("{settings:?}").contains("s3cret"));
+    }
+}
