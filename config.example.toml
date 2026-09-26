@@ -8,6 +8,9 @@
 # only). Those changes are stored in the database and win over this file;
 # `/config unset <key>` goes back to the value here.
 
+# Runtime. The IANA timezone used by schedules; defaults to the system's.
+# timezone = "Asia/Kolkata"
+
 [telegram]
 # From @BotFather. Prefer the ASSISTANT_TELEGRAM__BOT_TOKEN env var.
 bot_token = "123456:ABC-DEF..."
@@ -75,3 +78,20 @@ version = "3.5"
 reading = { brightness = 90, temperature = "neutral" }
 night = { brightness = 5, temperature = "warm" }
 relax = { brightness = 40, color = "orange" }
+
+# Runtime. Schedules run /light actions at a time of day; easiest to manage
+# with `/light schedule add|pause|resume|run|remove` and `/light schedules`.
+[modules.lights.schedules.bedtime]
+at = "22:30"
+# daily (default), weekdays, weekends, mon,wed,fri or mon-fri.
+days = "daily"
+action = "preset night"
+
+[modules.lights.schedules.wake]
+at = "06:45"
+days = "weekdays"
+action = "brightness 100"
+# Reach the action's brightness gradually, starting at `at`.
+fade = "15m"
+# Paused schedules stay configured but don't run.
+enabled = false

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::model::Preset;
+use super::{model::Preset, schedule::Schedule};
 use crate::{config::Secret, settings::keys::RuntimeSetting};
 
 /// Telegram limits callback data to 64 bytes, which hold the light and the
@@ -22,6 +22,10 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         "presets",
         "Named presets, e.g. {\"brightness\": 80, \"temperature\": \"warm\"}",
     ),
+    RuntimeSetting::per_entry(
+        "schedules",
+        "Named schedules; easiest to add with /light schedule add",
+    ),
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -30,6 +34,7 @@ pub struct LightsSettings {
     default: Option<String>,
     devices: BTreeMap<String, DeviceConfig>,
     presets: BTreeMap<String, Preset>,
+    schedules: BTreeMap<String, Schedule>,
 }
 
 impl LightsSettings {
@@ -39,6 +44,21 @@ impl LightsSettings {
 
     pub fn presets(&self) -> &BTreeMap<String, Preset> {
         &self.presets
+    }
+
+    pub fn schedules(&self) -> &BTreeMap<String, Schedule> {
+        &self.schedules
+    }
+
+    /// Checks a name for a new schedule.
+    pub fn validate_new_name(&self, name: &str) -> Result<(), String> {
+        validate_name(name)?;
+        if self.schedules.contains_key(name) {
+            return Err(format!(
+                "there is already a schedule `{name}`; remove it first"
+            ));
+        }
+        Ok(())
     }
 
     /// The light a command applies to when it names none.
@@ -86,13 +106,19 @@ struct RawLightsSettings {
     default: Option<String>,
     devices: BTreeMap<String, DeviceConfig>,
     presets: BTreeMap<String, Preset>,
+    schedules: BTreeMap<String, Schedule>,
 }
 
 impl TryFrom<RawLightsSettings> for LightsSettings {
     type Error = String;
 
     fn try_from(raw: RawLightsSettings) -> Result<Self, Self::Error> {
-        for name in raw.devices.keys().chain(raw.presets.keys()) {
+        for name in raw
+            .devices
+            .keys()
+            .chain(raw.presets.keys())
+            .chain(raw.schedules.keys())
+        {
             validate_name(name)?;
         }
 
@@ -122,11 +148,20 @@ impl TryFrom<RawLightsSettings> for LightsSettings {
                 .map_err(|error| format!("preset `{name}`: {error}"))?;
         }
 
-        Ok(Self {
+        // Schedules are checked against the lights and presets.
+        let mut settings = Self {
             default: raw.default,
             devices: raw.devices,
             presets: raw.presets,
-        })
+            schedules: BTreeMap::new(),
+        };
+        for (name, schedule) in &raw.schedules {
+            schedule
+                .validate(&settings)
+                .map_err(|error| format!("schedule `{name}`: {error}"))?;
+        }
+        settings.schedules = raw.schedules;
+        Ok(settings)
     }
 }
 
@@ -136,6 +171,7 @@ impl From<LightsSettings> for RawLightsSettings {
             default: settings.default,
             devices: settings.devices,
             presets: settings.presets,
+            schedules: settings.schedules,
         }
     }
 }

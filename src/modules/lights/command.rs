@@ -3,6 +3,7 @@
 
 use super::{
     model::{Brightness, Hsv, parse_brightness, parse_color, parse_temperature},
+    schedule::{self, ScheduleCommand},
     settings::LightsSettings,
 };
 
@@ -14,6 +15,9 @@ pub const USAGE: &str = "\
 /light color red | #ff8800
 /light preset <name> (or just /light <name>)
 /light status | list | help
+/light schedules — list, pause and run them
+/light schedule add <name> <HH:MM> [daily|weekdays|mon,wed…] <action> [fade 15m]
+/light schedule <name> pause | resume | run | remove
 
 Start with a light's name to pick one, e.g. /light desk off.";
 
@@ -30,6 +34,8 @@ pub enum Action {
     Temperature(u8),
     Color(Hsv),
     Preset(String),
+    Schedules,
+    Schedule(ScheduleCommand),
 }
 
 /// A parsed `/light` invocation.
@@ -65,6 +71,10 @@ pub fn parse(args: &str, settings: &LightsSettings) -> Result<Request, String> {
         }
         Some("status" | "state") => Action::Status,
         Some("list" | "lights") => Action::List,
+        Some("schedules" | "timers") => Action::Schedules,
+        Some("schedule" | "timer") => {
+            Action::Schedule(schedule::parse_command(&rest, light.as_deref(), settings)?)
+        }
         Some("help") => Action::Help,
         Some("on") => Action::On,
         Some("off") => Action::Off,
@@ -96,7 +106,17 @@ pub fn parse(args: &str, settings: &LightsSettings) -> Result<Request, String> {
 fn is_simple(verb: &str) -> bool {
     matches!(
         verb,
-        "panel" | "status" | "state" | "list" | "lights" | "help" | "on" | "off" | "toggle"
+        "panel"
+            | "status"
+            | "state"
+            | "list"
+            | "lights"
+            | "schedules"
+            | "timers"
+            | "help"
+            | "on"
+            | "off"
+            | "toggle"
     )
 }
 

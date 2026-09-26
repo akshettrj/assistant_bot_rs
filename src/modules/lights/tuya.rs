@@ -14,9 +14,13 @@
 //! The encoding is pure ([`encode`], [`decode`]) so that it can be tested
 //! without a device.
 
-use std::{str::FromStr, time::Duration};
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
-use futures::future::BoxFuture;
+use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
@@ -252,28 +256,50 @@ pub fn encode(
     Ok(dps)
 }
 
-/// Extracts the DPs from a device response (`{"dps": {...}, ...}`).
+/// Extracts the DPs from a device message: `{"dps": {...}}` (queries,
+/// protocol ≤ 3.3 pushes) or `{"data": {"dps": {...}}}` (3.4+ pushes).
+fn find_dps(value: Value) -> Option<Map<String, Value>> {
+    let Value::Object(mut object) = value else {
+        return None;
+    };
+    match object.remove("dps") {
+        Some(Value::Object(dps)) => Some(dps),
+        _ => match object.remove("data") {
+            Some(data) => find_dps(data),
+            None => None,
+        },
+    }
+}
+
+/// Parses a query response; devices sometimes answer with bare DPs.
 fn parse_dps(response: Option<String>) -> LightResult<Map<String, Value>> {
     let response = response.ok_or_else(|| LightError::Protocol("empty response".into()))?;
     let value: Value = serde_json::from_str(&response)
         .map_err(|error| LightError::Protocol(format!("invalid JSON: {error}")))?;
 
-    match value {
-        Value::Object(mut object) => match object.remove("dps") {
-            Some(Value::Object(dps)) => Ok(dps),
-            _ => Ok(object),
+    match find_dps(value.clone()) {
+        Some(dps) => Ok(dps),
+        None => match value {
+            Value::Object(object) if object.keys().all(|key| key.parse::<u32>().is_ok()) => {
+                Ok(object)
+            }
+            _ => Err(LightError::Protocol(format!(
+                "unexpected response: {response}"
+            ))),
         },
-        _ => Err(LightError::Protocol(format!(
-            "unexpected response: {response}"
-        ))),
     }
 }
 
 /// A Tuya light over the LAN.
 pub struct TuyaLight {
     device: rustuya::Device,
+    /// Serialises the requests to the device, which the library recommends
+    /// for strict request/response matching.
+    requests: Mutex<()>,
     /// From the config, or detected on first contact.
-    schema: Mutex<Option<Schema>>,
+    schema: Arc<StdMutex<Option<Schema>>>,
+    /// The last known DPs; pushes only carry the ones that changed.
+    dps: Arc<StdMutex<Map<String, Value>>>,
 }
 
 impl TuyaLight {
@@ -296,31 +322,42 @@ impl TuyaLight {
 
         Self {
             device: builder.build(),
-            schema: Mutex::new(Schema::from_layout(config.layout)),
+            requests: Mutex::new(()),
+            schema: Arc::new(StdMutex::new(Schema::from_layout(config.layout))),
+            dps: Arc::new(StdMutex::new(Map::new())),
         }
     }
 
-    /// The current DPs and the schema, detecting it if needed.
-    ///
-    /// Holding the lock also serialises the requests to the device, which
-    /// the library recommends for strict request/response matching.
-    async fn read(&self, schema: &mut Option<Schema>) -> LightResult<(Schema, Map<String, Value>)> {
+    /// Queries the DPs, refreshing the cache, and returns them with the
+    /// schema.
+    async fn read(&self) -> LightResult<(Schema, Map<String, Value>)> {
         let dps = parse_dps(self.device.status().await.map_err(unreachable)?)?;
-        let detected = match *schema {
-            Some(schema) => schema,
-            None => {
-                let detected = Schema::detect(&dps).ok_or_else(|| {
-                    LightError::Unsupported(format!(
-                        "unrecognised data points {:?}; set `layout` in the light's config",
-                        dps.keys().collect::<Vec<_>>()
-                    ))
-                })?;
-                *schema = Some(detected);
-                detected
-            }
-        };
-        Ok((detected, dps))
+        *lock(&self.dps) = dps.clone();
+        let schema = schema_for(&self.schema, &dps)?;
+        Ok((schema, dps))
     }
+}
+
+fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The known schema, or the one detected from `dps`.
+fn schema_for(schema: &StdMutex<Option<Schema>>, dps: &Map<String, Value>) -> LightResult<Schema> {
+    let mut schema = lock(schema);
+    if let Some(schema) = *schema {
+        return Ok(schema);
+    }
+    let detected = Schema::detect(dps).ok_or_else(|| {
+        LightError::Unsupported(format!(
+            "unrecognised data points {:?}; set `layout` in the light's config",
+            dps.keys().collect::<Vec<_>>()
+        ))
+    })?;
+    *schema = Some(detected);
+    Ok(detected)
 }
 
 fn unreachable(error: rustuya::TuyaError) -> LightError {
@@ -330,16 +367,16 @@ fn unreachable(error: rustuya::TuyaError) -> LightError {
 impl LightDriver for TuyaLight {
     fn state(&self) -> BoxFuture<'_, LightResult<LightState>> {
         Box::pin(async move {
-            let mut schema = self.schema.lock().await;
-            let (schema, dps) = self.read(&mut schema).await?;
+            let _request = self.requests.lock().await;
+            let (schema, dps) = self.read().await?;
             decode(&schema, &dps)
         })
     }
 
     fn apply(&self, change: LightChange) -> BoxFuture<'_, LightResult<LightState>> {
         Box::pin(async move {
-            let mut schema = self.schema.lock().await;
-            let (schema, mut dps) = self.read(&mut schema).await?;
+            let _request = self.requests.lock().await;
+            let (schema, mut dps) = self.read().await?;
             let current = decode(&schema, &dps)?;
 
             let update = encode(&schema, &change, &current)?;
@@ -351,8 +388,30 @@ impl LightDriver for TuyaLight {
             // Devices only acknowledge; the new state is the old one with
             // the update applied.
             dps.extend(update);
+            *lock(&self.dps) = dps.clone();
             decode(&schema, &dps)
         })
+    }
+
+    fn watch(&self) -> BoxStream<'static, LightState> {
+        let schema = Arc::clone(&self.schema);
+        let cache = Arc::clone(&self.dps);
+
+        Box::pin(self.device.listener().filter_map(move |message| {
+            let schema = Arc::clone(&schema);
+            let cache = Arc::clone(&cache);
+            async move {
+                let payload = message.ok()?.payload_as_string()?;
+                let changed = find_dps(serde_json::from_str(&payload).ok()?)?;
+                let dps = {
+                    let mut cache = lock(&cache);
+                    cache.extend(changed);
+                    cache.clone()
+                };
+                let schema = schema_for(&schema, &dps).ok()?;
+                decode(&schema, &dps).ok()
+            }
+        }))
     }
 }
 
@@ -545,6 +604,19 @@ mod tests {
             encode(&V2, &change, &current),
             Err(LightError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn finds_dps_in_pushes() {
+        assert_eq!(
+            find_dps(json!({"protocol": 4, "t": 1, "data": {"dps": {"20": false}}})),
+            Some(dps(json!({"20": false})))
+        );
+        assert_eq!(
+            find_dps(json!({"dps": {"22": 10}})),
+            Some(dps(json!({"22": 10})))
+        );
+        assert_eq!(find_dps(json!({"Err": "901"})), None);
     }
 
     #[test]

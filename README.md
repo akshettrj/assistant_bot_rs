@@ -146,6 +146,7 @@ colours and your presets. Every button is also a text command:
 /light color red | #ff8800
 /light reading                 apply the `reading` preset
 /light desk off                with several lights, name one first
+/light schedules               see below
 ```
 
 Setup, once per bulb:
@@ -169,6 +170,38 @@ Presets are runtime settings:
 /config set modules.lights.presets.movie {"brightness": 20, "color": "purple"}
 ```
 
+**Live panels.** Panels posted in the last 48 hours update themselves when the
+light changes, whether from Telegram, a schedule, or the Smart Life app, using
+the status the bulb pushes. `assistant_bot_rs light watch` prints those pushes
+in a terminal.
+
+#### Schedules
+
+Schedules run a `/light` action at a time of day, in the configured `timezone`
+(the system's by default):
+
+```
+/light schedule add bedtime 22:30 daily preset night
+/light schedule add wake 06:45 weekdays brightness 100 fade 15m
+/light schedule add lights-out 23:30 off fade 10m
+/light schedules                    list them, with pause/resume/run buttons
+/light schedule wake pause | resume | run | remove
+```
+
+- The days are `daily` (the default), `weekdays`, `weekends`, `mon,wed,fri` or
+  `mon-fri`. Start with a light's name to pick the light
+  (`/light desk schedule add …`).
+- `fade` reaches the action's brightness gradually, starting at the scheduled
+  time. It needs a target brightness: `brightness 100`, `off`, or a preset with
+  a brightness. A fade stops as soon as the light is changed some other way,
+  from `/light` or from the app.
+- A schedule that fails (e.g. the bulb is offline) is reported to the error
+  logs chat. Runs missed by more than 2 minutes, e.g. while the bot was down,
+  are skipped.
+- Schedules are runtime settings (`modules.lights.schedules.<name>`), so they
+  persist and can also be written in `config.toml` (see the example). Ones from
+  the config file can be paused but not removed from Telegram.
+
 The Tuya protocol is handled by [rustuya](https://crates.io/crates/rustuya)
 behind a small driver trait (`modules::lights::driver`), so other kinds of
 lights can be added without touching the commands or the panel.
@@ -182,13 +215,14 @@ src/
 ├── settings/                 runtime overrides: keys, module settings, store,
 │                             operations shared by /config and the CLI
 ├── telemetry.rs              tracing subscriber with a reloadable filter
+├── scheduling.rs             times of day, weekdays and recurrences
 ├── context.rs                AppContext: state shared with every handler
 ├── access.rs                 who may use which module
 ├── bot/                      Telegram client, handler tree, error reporting,
 │                             command menus
 ├── modules/                  Module trait, registry, built-in modules
 │   ├── general.rs            /start, /help, /id
-│   ├── lights/               /light: Tuya bulbs over the LAN
+│   ├── lights/               /light: Tuya bulbs over the LAN, schedules
 │   └── settings.rs           /config
 └── db/                       connection, entities, repositories
 migration/                    SeaORM migrations (workspace member)
@@ -297,6 +331,10 @@ never see a half-applied change.
    update rather than caching them, so runtime changes are picked up.
 4. Grant access with `/config add telegram.allowed_users.ping <user id>`, or in
    the config file.
+
+Long-running work, such as timers or device watchers, goes in
+`Module::background`. It starts with the bot and is cancelled at shutdown. See
+the `lights` module's schedules for an example.
 
 At startup, the registry rejects duplicate module ids, commands declared by two
 modules, settings sections that match no module, runtime keys that are not

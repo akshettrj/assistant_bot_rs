@@ -7,7 +7,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use futures::future::BoxFuture;
+use futures::{future::BoxFuture, stream::BoxStream};
 use tokio::sync::Mutex;
 
 use super::{
@@ -34,6 +34,12 @@ pub trait LightDriver: Send + Sync + 'static {
 
     /// Applies the change and returns the resulting state.
     fn apply(&self, change: LightChange) -> BoxFuture<'_, LightResult<LightState>>;
+
+    /// The states the light reports on its own, e.g. when it is changed from
+    /// another app. Ends when the driver is dropped.
+    fn watch(&self) -> BoxStream<'static, LightState> {
+        Box::pin(futures::stream::empty())
+    }
 }
 
 /// Builds the driver of a configured light.
@@ -81,9 +87,25 @@ pub(crate) mod fake {
     use super::*;
     use crate::modules::lights::model::Mode;
 
+    fn tokio_stream_from(
+        receiver: tokio::sync::broadcast::Receiver<LightState>,
+    ) -> impl futures::Stream<Item = LightState> + Send + 'static {
+        futures::stream::unfold(receiver, |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(state) => return Some((state, receiver)),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        })
+    }
+
     pub struct FakeLight {
         pub state: StdMutex<LightResult<LightState>>,
         pub changes: StdMutex<Vec<LightChange>>,
+        /// Pushes a state to the watchers, as if changed from another app.
+        pub pushes: tokio::sync::broadcast::Sender<LightState>,
     }
 
     impl FakeLight {
@@ -98,6 +120,7 @@ pub(crate) mod fake {
                     supports_color: true,
                 })),
                 changes: StdMutex::new(Vec::new()),
+                pushes: tokio::sync::broadcast::channel(16).0,
             })
         }
 
@@ -109,6 +132,14 @@ pub(crate) mod fake {
 
         pub fn current(&self) -> LightState {
             self.state.lock().unwrap().clone().unwrap()
+        }
+
+        /// Changes the light behind the bot's back.
+        pub fn change_externally(&self, change: impl FnOnce(&mut LightState)) {
+            let mut state = self.state.lock().unwrap();
+            let state = state.as_mut().unwrap();
+            change(state);
+            let _ = self.pushes.send(state.clone());
         }
     }
 
@@ -138,6 +169,11 @@ pub(crate) mod fake {
                 }
                 Ok(current.clone())
             })
+        }
+
+        fn watch(&self) -> BoxStream<'static, LightState> {
+            let pushes = tokio_stream_from(self.pushes.subscribe());
+            Box::pin(pushes)
         }
     }
 }

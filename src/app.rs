@@ -61,16 +61,21 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Light { args } => {
             let db = connect_and_migrate(&config).await?;
-            let settings = SettingsStore::load(base, db, &registry, None)
+            let settings = SettingsStore::load(base, db.clone(), &registry, None)
                 .await
                 .context("failed to load the runtime settings")?;
-            let lights = settings
-                .current()
-                .module_settings::<modules::lights::settings::LightsSettings>(modules::lights::ID)
-                .cloned()
-                .unwrap_or_default();
+            let ctx = AppContext::new(settings, db, registry);
 
-            match modules::lights::run_once(&lights, &args.join(" ")).await {
+            if let Some(("watch", rest)) =
+                args.split_first().map(|(verb, rest)| (verb.as_str(), rest))
+            {
+                let light = rest.first().map(String::as_str);
+                return modules::lights::watch_once(&ctx, light)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error));
+            }
+
+            match modules::lights::run_once(&ctx, &args.join(" ")).await {
                 Ok(output) => {
                     println!("{output}");
                     Ok(())

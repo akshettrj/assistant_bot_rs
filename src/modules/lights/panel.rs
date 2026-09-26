@@ -3,6 +3,8 @@
 //! A button's callback data is `light:<light>:<command words>`, parsed with
 //! the same grammar as `/light` (see [`super::command`]).
 
+use chrono::DateTime;
+use chrono_tz::Tz;
 use teloxide::{
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
     utils::html::{bold, escape},
@@ -15,6 +17,9 @@ use super::{
 };
 
 pub const CALLBACK_PREFIX: &str = "light:";
+/// Stands for "no light" in callback data, for buttons such as the
+/// schedules'.
+pub const NO_LIGHT: &str = "-";
 
 const COLOR_BUTTONS: &[(&str, &str)] = &[
     ("red", "🔴"),
@@ -30,6 +35,61 @@ const BRIGHTNESS_STEP: u8 = 20;
 /// Splits callback data into the light and the command words.
 pub fn parse_callback(data: &str) -> Option<(&str, &str)> {
     data.strip_prefix(CALLBACK_PREFIX)?.split_once(':')
+}
+
+/// The list of schedules, with their next run.
+pub fn schedules_text(settings: &LightsSettings, now: DateTime<Tz>) -> String {
+    let mut text = format!(
+        "⏰ {} ({})",
+        bold("Schedules"),
+        escape(now.timezone().name())
+    );
+    if settings.schedules().is_empty() {
+        text.push_str(&escape(
+            "\n\nNone yet. Add one with e.g.\n/light schedule add bedtime 22:00 daily preset \
+             night\n/light schedule add wake 06:45 weekdays brightness 100 fade 15m",
+        ));
+        return text;
+    }
+
+    for (name, schedule) in settings.schedules() {
+        let status = if schedule.enabled {
+            schedule.recurrence().next(now).map_or_else(
+                || "never".to_string(),
+                |next| format!("next {}", next.format("%a %d %b %H:%M")),
+            )
+        } else {
+            "paused".to_string()
+        };
+        text.push_str(&format!(
+            "\n\n{} {} — {}\n{}",
+            if schedule.enabled { "▶️" } else { "⏸" },
+            bold(&escape(name)),
+            escape(&schedule.describe(settings)),
+            escape(&status),
+        ));
+    }
+    text
+}
+
+/// Pause/resume and run buttons for every schedule.
+pub fn schedules_keyboard(settings: &LightsSettings) -> InlineKeyboardMarkup {
+    let button = |label: String, words: String| {
+        InlineKeyboardButton::callback(label, format!("{CALLBACK_PREFIX}{NO_LIGHT}:{words}"))
+    };
+    InlineKeyboardMarkup::new(settings.schedules().iter().map(|(name, schedule)| {
+        vec![
+            if schedule.enabled {
+                button(format!("⏸ Pause {name}"), format!("schedule {name} pause"))
+            } else {
+                button(
+                    format!("▶️ Resume {name}"),
+                    format!("schedule {name} resume"),
+                )
+            },
+            button(format!("⚡ Run {name}"), format!("schedule {name} run")),
+        ]
+    }))
 }
 
 /// The panel's text for a light.
