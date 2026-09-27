@@ -377,8 +377,21 @@ fn working(trip: &TripView, draft: &Draft, checked: &Checked) -> Vec<String> {
         lines.push(escape(&format!("{method}: {}", owes(*weighted))));
         return lines;
     }
-    for line in &checked.lines {
+    // A long receipt stays within a message: the owed amounts say it all.
+    const MAX_LINES: usize = 12;
+    let shown = if checked.lines.len() > MAX_LINES {
+        MAX_LINES - 2
+    } else {
+        checked.lines.len()
+    };
+    for line in &checked.lines[..shown] {
         lines.push(escape(&format!("• {}", working_line(trip, line))));
+    }
+    if shown < checked.lines.len() {
+        lines.push(escape(&format!(
+            "• … and {} more",
+            checked.lines.len() - shown
+        )));
     }
     lines.push(escape(&format!("➗ Owes: {}", owes(false))));
     lines

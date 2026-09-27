@@ -111,8 +111,10 @@ them.
      can't express goes in `unclear`, shown on the card.
   2. Every amount returned must appear literally in the user's text (as a
      number of its own: `400` is not in `2,400`), or the message is refused.
-  3. Receipts: the AI extracts line items and the printed total; Rust sums the
-     items and shows any mismatch. Tax and tip are items.
+  3. Receipts: the AI first writes a `transcript` of everything printed, then
+     reads its items, the printed total and tax, service or tip (as extras)
+     into claims; their numbers must appear in the transcript or the caption,
+     and Rust checks the items against the total.
   4. Questions: the AI picks a query from a fixed menu (`spend(by=category |
      person, range, ..)`); Rust runs it and templates every number in the
      reply.
@@ -139,8 +141,12 @@ them.
   the subscription).
 - **When**: only on request: `/ai <text>`, or a message starting with the
   optional `ai_keyword`. Nothing else is read.
-- Receipt images need `--input-format stream-json` with an image block: to be
-  proven by a spike before phase 3.
+- **Images**: a photo or image file (≤ 5 MB) captioned `/ai …` or the
+  keyword, or `/ai …` in reply to one, goes to the CLI with
+  `--input-format stream-json` as a base64 image block.
+- **Names**: the sender's own names (their name on the trip and nicknames,
+  set with `/trip rename` and `/trip nick`) are given to the AI, since a
+  Telegram name needn't be a real one.
 
 ## Settings
 

@@ -253,6 +253,39 @@ pub async fn add_nickname(
     Ok(trips::set_nicknames(db, id, &nicknames).await?)
 }
 
+/// Renames member `id`: themselves, or the trip's creator, may.
+pub async fn rename_member(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    id: MemberId,
+    name: &str,
+) -> Result<()> {
+    let member = trip
+        .member(id)
+        .ok_or_else(|| TripsError::Invalid("that person isn't on the trip".into()))?;
+    if member.user != Some(by) {
+        require_creator(trip, by)?;
+    }
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME {
+        return Err(TripsError::Invalid(format!(
+            "a name has 1 to {MAX_NAME} characters"
+        )));
+    }
+    let lowercase = name.to_lowercase();
+    let taken = trip.members.iter().any(|other| {
+        other.id != id
+            && other
+                .names()
+                .any(|called| called.to_lowercase() == lowercase)
+    });
+    if taken {
+        return Err(TripsError::NameTaken(name.to_string()));
+    }
+    Ok(trips::rename_member(db, id, name).await?)
+}
+
 /// Forgets a nickname of member `id`; anyone on the trip may.
 pub async fn remove_nickname(
     db: &DatabaseConnection,
@@ -967,6 +1000,26 @@ mod tests {
         // Someone joining under a nickname gets a variant.
         let other = join(&db, &trip, UserId(3), "Bobby").await.unwrap();
         assert_eq!(other.name, "Bobby 2");
+
+        // Your own name: yours or the creator's to change.
+        rename_member(&db, &trip, BOB, bob, "Robert").await.unwrap();
+        assert!(matches!(
+            rename_member(&db, &trip, UserId(3), bob, "Rob").await,
+            Err(TripsError::NotAllowed(_))
+        ));
+        assert!(matches!(
+            rename_member(&db, &trip, BOB, bob, "Ann").await,
+            Err(TripsError::NameTaken(_))
+        ));
+        assert_eq!(
+            load(&db, trip.trip.id)
+                .await
+                .unwrap()
+                .member(bob)
+                .unwrap()
+                .name,
+            "Robert"
+        );
 
         remove_nickname(&db, &trip, BOB, bob, "Bobby")
             .await

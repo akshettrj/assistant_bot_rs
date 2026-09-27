@@ -341,9 +341,20 @@ lands on a draft card marked 🤖 with the working shown, which you check and
 save as usual; anything the AI couldn't place is listed on the card. To fix a
 card in words, reply to it with `/ai Mom wasn't there` (or press its 🤖
 Change with AI… button): the AI rewrites that draft, and may reuse its numbers
-as well as the new message's. It never
-does the maths: any number it gives that isn't written in your message is
-refused, and every total, share and conversion is computed by the bot.
+as well as the new message's. It never does the maths: any number it gives
+that isn't written in your message is refused, and every total, share and
+conversion is computed by the bot.
+
+Receipts and bills work too: send the photo (or an image file, up to 5 MB)
+with `/ai` as its caption, e.g. `/ai I paid, the wine was Bob's`, or reply to
+a photo with `/ai …`. The AI first writes out everything printed on it, then
+reads the items, the total and any tax or service lines as claims; its numbers
+must come from that transcript or your caption, and the bot checks the items
+against the printed total.
+
+Your name on a trip starts as your Telegram first name: `/trip rename Alex`
+changes it, and `/trip nick Lex` adds another name you go by, so that the AI
+(and everyone's messages) know you by it.
 
 ## AI
 

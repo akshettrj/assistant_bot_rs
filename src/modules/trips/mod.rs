@@ -166,6 +166,11 @@ impl Module for TripsModule {
                     .endpoint(telegram::messages::read_keyword),
             )
             .branch(
+                Update::filter_message()
+                    .filter_map(telegram::messages::photo_request)
+                    .endpoint(telegram::messages::read_photo),
+            )
+            .branch(
                 Update::filter_callback_query()
                     .filter(|query: CallbackQuery| {
                         query

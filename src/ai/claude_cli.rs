@@ -7,6 +7,7 @@
 
 use std::{io::ErrorKind, path::Path, process::Stdio, time::Duration};
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore};
@@ -69,7 +70,19 @@ impl ClaudeCli {
         command
             .args(["-p", "--tools", "", "--strict-mcp-config"])
             .args(["--disable-slash-commands", "--no-session-persistence"])
-            .args(["--output-format", "json", "--json-schema", schema])
+            .args(if streams(request) {
+                // Images only go in a stream of JSON messages.
+                &[
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                ][..]
+            } else {
+                &["--output-format", "json"][..]
+            })
+            .args(["--json-schema", schema])
             .args([
                 "--system-prompt",
                 &request.system,
@@ -114,7 +127,7 @@ impl ClaudeCli {
         let exchange = async {
             // The CLI may exit without reading it (e.g. not logged in): its
             // output then says why.
-            if let Err(error) = stdin.write_all(request.text.as_bytes()).await {
+            if let Err(error) = stdin.write_all(&input(request)).await {
                 tracing::debug!(%error, "the Claude CLI didn't take the message");
             }
             drop(stdin);
@@ -125,7 +138,7 @@ impl ClaudeCli {
             .map_err(|_| AiError::Timeout)?
             .map_err(|error| AiError::Unavailable(error.to_string()))?;
 
-        match serde_json::from_slice::<Output>(&output.stdout) {
+        match read_output(&output.stdout, streams(request)) {
             Ok(result) => result.into_answer(),
             Err(_) if !output.status.success() => Err(AiError::Failed(shorten(
                 &String::from_utf8_lossy(&output.stderr),
@@ -133,6 +146,57 @@ impl ClaudeCli {
             Err(error) => Err(AiError::Invalid(format!("unreadable output: {error}"))),
         }
     }
+}
+
+/// Whether the request goes as a stream of JSON messages: it has images.
+fn streams(request: &Request) -> bool {
+    !request.images.is_empty()
+}
+
+/// What the CLI reads: the text, or a user message with the images first.
+fn input(request: &Request) -> Vec<u8> {
+    if !streams(request) {
+        return request.text.clone().into_bytes();
+    }
+    let mut content: Vec<serde_json::Value> = request
+        .images
+        .iter()
+        .map(|image| {
+            serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image.media_type,
+                    "data": BASE64.encode(&image.data),
+                },
+            })
+        })
+        .collect();
+    content.push(serde_json::json!({"type": "text", "text": request.text}));
+    let message = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": content},
+    });
+    let mut line = message.to_string().into_bytes();
+    line.push(b'\n');
+    line
+}
+
+/// The CLI's result: all of its output, or the last `result` message of a
+/// stream.
+fn read_output(stdout: &[u8], streamed: bool) -> Result<Output, serde_json::Error> {
+    if !streamed {
+        return serde_json::from_slice(stdout);
+    }
+    let mut last = Err(serde::de::Error::custom("no result in the stream"));
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if let Ok(message) = serde_json::from_slice::<serde_json::Value>(line)
+            && message["type"] == "result"
+        {
+            last = serde_json::from_value(message);
+        }
+    }
+    last
 }
 
 /// What `claude -p --output-format json` prints.
@@ -205,6 +269,7 @@ mod tests {
             text: "the answer is 42".into(),
             schema: json!({"type": "object"}),
             model: "haiku".into(),
+            images: Vec::new(),
         }
     }
 
@@ -332,6 +397,48 @@ echo '{"type":"result","is_error":false,"result":"","structured_output":{"answer
             .await
             .unwrap_err();
         assert!(matches!(error, AiError::Unavailable(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn images_go_in_a_stream_of_json_messages() {
+        let _serial = SCRIPTS.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(
+            dir.path(),
+            r#"printf '%s\n' "$@" > "$LOG/args"
+cat > "$LOG/stdin"
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"assistant","message":{}}'
+echo '{"type":"result","is_error":false,"result":"","structured_output":{"read":true}}'"#,
+        );
+        let request = Request {
+            images: vec![super::super::Image {
+                media_type: "image/jpeg".into(),
+                data: b"hi".to_vec(),
+            }],
+            ..request()
+        };
+        let answer = cli(&program, Duration::from_secs(10))
+            .complete(&request)
+            .await
+            .unwrap();
+        assert_eq!(answer, json!({"read": true}));
+
+        let log = dir.path().join("log");
+        let args = std::fs::read_to_string(log.join("args")).unwrap();
+        assert!(
+            args.contains("--input-format\nstream-json\n--output-format\nstream-json\n--verbose\n"),
+            "{args}"
+        );
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(log.join("stdin")).unwrap()).unwrap();
+        assert_eq!(
+            stdin,
+            json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "aGk="}},
+                {"type": "text", "text": "the answer is 42"},
+            ]}})
+        );
     }
 
     /// Asks the real Claude, with `ASSISTANT_AI__OAUTH_TOKEN` set:

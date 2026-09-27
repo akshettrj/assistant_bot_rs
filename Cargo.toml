@@ -57,6 +57,7 @@ migration = { path = "migration" }
 
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
+base64 = "0.22.1"
 chrono = { workspace = true }
 chrono-tz = "0.10.4"
 clap = { workspace = true }

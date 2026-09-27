@@ -37,6 +37,25 @@ pub struct Request {
     pub schema: serde_json::Value,
     /// The model, as `ai.model` names it.
     pub model: String,
+    /// Pictures to read along with the text (e.g. a receipt).
+    pub images: Vec<Image>,
+}
+
+/// A picture, as its bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Image {
+    /// E.g. `image/jpeg`.
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Image")
+            .field("media_type", &self.media_type)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

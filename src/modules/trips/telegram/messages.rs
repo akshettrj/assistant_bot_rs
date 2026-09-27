@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use teloxide::{
+    net::Download,
     prelude::*,
-    types::{Me, MessageId, User},
+    types::{FileId, Me, MessageId, User},
     utils::html::escape,
 };
 
@@ -68,7 +69,118 @@ pub async fn read_keyword(
     let Some(user) = msg.from.clone() else {
         return Ok(());
     };
-    read(&bot, &ctx, &state, &msg, &user, &text).await
+    read(&bot, &ctx, &state, &msg, &user, &text, None).await
+}
+
+/// The largest image sent to the AI.
+const MAX_PHOTO: u32 = 5 * 1024 * 1024;
+
+/// An image in a message: a photo, or an image sent as a file.
+#[derive(Clone, Debug)]
+pub struct Photo {
+    file: FileId,
+    media_type: String,
+    size: u32,
+}
+
+/// The image in `msg`, if there is one.
+fn photo_of(msg: &Message) -> Option<Photo> {
+    if let Some(sizes) = msg.photo() {
+        // The largest size comes last.
+        let largest = sizes.last()?;
+        return Some(Photo {
+            file: largest.file.id.clone(),
+            media_type: "image/jpeg".to_string(),
+            size: largest.file.size,
+        });
+    }
+    let document = msg.document()?;
+    let media_type = document.mime_type.as_ref()?.essence_str().to_string();
+    matches!(
+        media_type.as_str(),
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+    )
+    .then(|| Photo {
+        file: document.file.id.clone(),
+        media_type,
+        size: document.file.size,
+    })
+}
+
+/// The caption's text after `/ai` (or the keyword), when `msg` is an image
+/// sent for the AI to read by someone who may use it.
+pub fn photo_request(msg: Message, me: Me, ctx: Arc<AppContext>) -> Option<String> {
+    let user = msg.from.as_ref()?;
+    if user.is_bot || ctx.ai.is_none() {
+        return None;
+    }
+    photo_of(&msg)?;
+    let caption = msg.caption()?;
+    let text = strip_command(caption, me.username()).or_else(|| {
+        let keyword = current_settings(&ctx).ai_keyword?;
+        if caption.trim().eq_ignore_ascii_case(&keyword) {
+            return Some(String::new());
+        }
+        strip_keyword(caption, &keyword).map(str::to_string)
+    })?;
+    ai::may_use(&ctx.settings.current(), user.id).then_some(text)
+}
+
+/// `text` after a leading `/ai` or `/ai@username`.
+fn strip_command(text: &str, username: &str) -> Option<String> {
+    let rest = text.trim_start().strip_prefix("/ai")?;
+    let rest = match rest.strip_prefix('@') {
+        Some(addressed) => {
+            let (name, rest) = addressed
+                .split_once(char::is_whitespace)
+                .unwrap_or((addressed, ""));
+            if !name.eq_ignore_ascii_case(username) {
+                return None;
+            }
+            rest
+        }
+        None if rest.is_empty() || rest.starts_with(char::is_whitespace) => rest,
+        None => return None,
+    };
+    Some(rest.trim().to_string())
+}
+
+/// An image sent with `/ai` (or the keyword) as its caption.
+pub async fn read_photo(
+    bot: AssistantBot,
+    msg: Message,
+    text: String,
+    ctx: Arc<AppContext>,
+    state: Arc<TripsState>,
+) -> HandlerResult {
+    let Some(user) = msg.from.clone() else {
+        return Ok(());
+    };
+    let photo = photo_of(&msg);
+    read(&bot, &ctx, &state, &msg, &user, &text, photo).await
+}
+
+/// Downloads an image for the AI.
+async fn download(bot: &AssistantBot, photo: &Photo) -> Result<ai::Image, String> {
+    if photo.size > MAX_PHOTO {
+        return Err("that image is too big: send one under 5 MB".to_string());
+    }
+    let unreachable = |error: &dyn std::fmt::Display| {
+        tracing::warn!(%error, "couldn't download an image");
+        "I couldn't download the image".to_string()
+    };
+    let file = bot
+        .get_file(photo.file.clone())
+        .await
+        .map_err(|error| unreachable(&error))?;
+    let mut data = Vec::new();
+    bot.download_file(&file.path, &mut data)
+        .await
+        .map_err(|error| unreachable(&error))?;
+    Ok(ai::Image {
+        media_type: photo.media_type.clone(),
+        data,
+    })
 }
 
 /// The AI, if `user` may use it; else why not.
@@ -84,8 +196,10 @@ fn llm_for(ctx: &AppContext, user: &User) -> Result<Arc<dyn Llm>, &'static str> 
     }
 }
 
-/// Reads `text` into a draft card, shown in place of a "Reading…"
-/// placeholder; or, in reply to a draft's card, corrects that draft.
+/// Reads `text` (and `photo`, or the photo it replies to) into draft cards,
+/// shown in place of a "Reading…" placeholder; or, in reply to a draft's
+/// card, corrects that draft.
+#[allow(clippy::too_many_arguments)] // The handler's context, and what to read.
 pub async fn read(
     bot: &AssistantBot,
     ctx: &AppContext,
@@ -93,19 +207,24 @@ pub async fn read(
     msg: &Message,
     user: &User,
     text: &str,
+    photo: Option<Photo>,
 ) -> HandlerResult {
     let llm = match llm_for(ctx, user) {
         Ok(llm) => llm,
         Err(problem) => return reply(bot, msg, escape(problem)).await,
     };
     let text = text.trim();
-    if text.is_empty() {
-        return reply(bot, msg, escape(AI_USAGE)).await;
-    }
-    if let Some(card) = msg.reply_to_message()
+    let replied = msg.reply_to_message();
+    if photo.is_none()
+        && !text.is_empty()
+        && let Some(card) = replied
         && let Some(stored) = service::find_draft_by_card(&ctx.db, msg.chat.id, card.id).await?
     {
         return correct(bot, ctx, state, msg, user, stored, card.id, text).await;
+    }
+    let photo = photo.or_else(|| replied.and_then(photo_of));
+    if text.is_empty() && photo.is_none() {
+        return reply(bot, msg, escape(AI_USAGE)).await;
     }
     let trip = match service::require_active(&ctx.db, msg.chat.id).await {
         Ok(trip) => trip,
@@ -116,20 +235,44 @@ pub async fn read(
         return reply_error(bot, msg, error).await;
     };
 
-    let placeholder = reply_with(bot, msg, "🤔 Reading…".to_string(), None).await?;
+    let reading = if photo.is_some() {
+        "🤔 Reading the image…"
+    } else {
+        "🤔 Reading…"
+    };
+    let placeholder = reply_with(bot, msg, reading.to_string(), None).await?;
+    let images = match &photo {
+        Some(photo) => match download(bot, photo).await {
+            Ok(image) => vec![image],
+            Err(problem) => return refuse(bot, &placeholder, &problem).await,
+        },
+        None => Vec::new(),
+    };
     let categories = model::categories(&current_settings(ctx));
     let request = ai::Request {
-        system: extract::instructions(&trip, &sender, &categories),
-        text: text.to_string(),
+        system: if images.is_empty() {
+            extract::instructions(&trip, &sender, &categories)
+        } else {
+            extract::photo_instructions(&trip, &sender, &categories)
+        },
+        text: if text.is_empty() {
+            "(no message: read the image)".to_string()
+        } else {
+            text.to_string()
+        },
         schema: extract::schema(&categories),
         model: ctx.settings.current().config.ai.model.clone(),
-    };
-    let sources = Sources {
-        message: text,
-        card: None,
+        images,
     };
     let drafts = match ai::extract::<Reading>(llm.as_ref(), &request).await {
         Ok(reading) => {
+            // Numbers may come from the image, as the AI transcribed it, only
+            // when there was one.
+            let sources = Sources {
+                message: text,
+                card: None,
+                photo: reading.transcript.as_deref().filter(|_| photo.is_some()),
+            };
             extract::to_drafts(&reading, sources, &trip, &sender, &categories, today(ctx))
                 .map_err(|rejection| rejection.to_string())
         }
@@ -215,10 +358,12 @@ pub async fn correct(
         text: text.to_string(),
         schema: extract::schema(&categories),
         model: ctx.settings.current().config.ai.model.clone(),
+        images: Vec::new(),
     };
     let sources = Sources {
         message: text,
         card: Some(&current),
+        photo: None,
     };
     let corrected = match ai::extract::<Reading>(llm.as_ref(), &request).await {
         Ok(reading) => extract::to_drafts(&reading, sources, &trip, &sender, &categories, today)
@@ -264,6 +409,20 @@ async fn refuse(bot: &AssistantBot, placeholder: &Message, problem: &str) -> Han
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captions_start_with_ai_or_ai_at_the_bot() {
+        let strip = |caption| strip_command(caption, "TripBot");
+        assert_eq!(strip("/ai lunch, I paid"), Some("lunch, I paid".into()));
+        assert_eq!(strip("/ai"), Some(String::new()));
+        assert_eq!(
+            strip("/ai@tripbot split with Bob"),
+            Some("split with Bob".into())
+        );
+        assert_eq!(strip("/ai@otherbot split"), None);
+        assert_eq!(strip("/aid 20"), None);
+        assert_eq!(strip("lunch"), None);
+    }
 
     #[test]
     fn keywords_start_the_message_as_a_word_of_their_own() {
