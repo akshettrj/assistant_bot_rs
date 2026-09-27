@@ -14,8 +14,9 @@ use super::{
 pub const TRIP_USAGE: &str =
     "/trip — this chat's trip: balances, entries, people, rates\n/trip new <name> [currency] — \
      start a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this chat's trip\n/trip \
-     add <name> — add someone without Telegram (the trip's creator)\n/spent 2400 dinner — log an \
-     expense · /balance — who owes whom · /settle — settle up";
+     add <name> — add someone without Telegram (the trip's creator)\n/trip end, /trip reopen — \
+     end the trip with a summary, or reopen it (the trip's creator)\n/spent 2400 dinner — log an \
+     expense · /balance — who owes whom · /settle — settle up · /export — a CSV file";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
@@ -36,6 +37,9 @@ pub enum TripCommand {
         name: String,
     },
     Help,
+    /// Ends the trip, posting its summary.
+    End,
+    Reopen,
 }
 
 pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
@@ -45,6 +49,8 @@ pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
     match verb.to_lowercase().as_str() {
         "" => Ok(TripCommand::Show),
         "help" => Ok(TripCommand::Help),
+        "end" => Ok(TripCommand::End),
+        "reopen" => Ok(TripCommand::Reopen),
         "new" => {
             let mut words: Vec<&str> = rest.split_whitespace().collect();
             let currency = match words.as_slice() {
@@ -466,6 +472,8 @@ mod tests {
             })
         );
         assert_eq!(parse_trip("join"), Ok(TripCommand::Join { name: None }));
+        assert_eq!(parse_trip("End"), Ok(TripCommand::End));
+        assert_eq!(parse_trip("reopen"), Ok(TripCommand::Reopen));
         assert!(parse_trip("add").is_err());
         assert!(parse_trip("new").is_err());
         assert!(parse_trip("fly").is_err());

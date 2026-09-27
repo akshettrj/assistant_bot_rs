@@ -41,6 +41,9 @@ pub enum Page {
     People,
     Rates,
     Switch,
+    Summary,
+    /// Asks whether to end the trip.
+    ConfirmEnd,
 }
 
 /// A value typed in answer to the panel's question.
@@ -85,6 +88,11 @@ pub enum Action {
     Restore(i32),
     RemoveRate(Currency),
     Ask(Field),
+    /// Ends the trip, posting its summary.
+    End,
+    Reopen,
+    /// Sends the entries as a CSV file.
+    Export,
 }
 
 impl Action {
@@ -105,6 +113,11 @@ impl Action {
             Self::RemoveRate(currency) => format!("rr:{currency}"),
             Self::Ask(Field::Person) => "a:person".to_string(),
             Self::Ask(Field::Rate) => "a:rate".to_string(),
+            Self::Show(Page::Summary) => "sum".to_string(),
+            Self::Show(Page::ConfirmEnd) => "ce".to_string(),
+            Self::End => "end".to_string(),
+            Self::Reopen => "reopen".to_string(),
+            Self::Export => "csv".to_string(),
         }
     }
 
@@ -130,6 +143,11 @@ impl Action {
             "x" => Self::Delete(next()?.parse().ok()?),
             "rs" => Self::Restore(next()?.parse().ok()?),
             "rr" => Self::RemoveRate(Currency::from_code(next()?).ok()?),
+            "sum" => Self::Show(Page::Summary),
+            "ce" => Self::Show(Page::ConfirmEnd),
+            "end" => Self::End,
+            "reopen" => Self::Reopen,
+            "csv" => Self::Export,
             "a" => match next()? {
                 "person" => Self::Ask(Field::Person),
                 "rate" => Self::Ask(Field::Rate),
@@ -228,6 +246,13 @@ pub fn home(trip: &TripView, entries: &[EntryRecord]) -> Rendered {
             button(id, "👥 People", &Action::Show(Page::People)),
             button(id, "💱 Rates", &Action::Show(Page::Rates)),
             button(id, "🔀 Switch trip", &Action::Show(Page::Switch)),
+            button(id, "📊 Summary", &Action::Show(Page::Summary)),
+            button(id, "📤 Export", &Action::Export),
+            if trip.trip.is_ended() {
+                button(id, "↩️ Reopen", &Action::Reopen)
+            } else {
+                button(id, "🏁 End trip", &Action::Show(Page::ConfirmEnd))
+            },
         ],
         2,
     );
@@ -331,7 +356,7 @@ pub fn entries(
     for (number, record) in (page * PAGE_SIZE + 1..).zip(&shown) {
         lines.push(escape(&format!(
             "{number}. {}",
-            summary(trip, record, today)
+            entry_line(trip, record, today)
         )));
     }
 
@@ -366,7 +391,7 @@ pub fn entries(
 }
 
 /// `Sat 26 Sep · dinner · 2,400.00 INR · Ann`
-fn summary(trip: &TripView, record: &EntryRecord, today: NaiveDate) -> String {
+fn entry_line(trip: &TripView, record: &EntryRecord, today: NaiveDate) -> String {
     let entry = &record.entry;
     let payers: Vec<String> = record
         .payers
@@ -560,6 +585,41 @@ pub fn rates(trip: &TripView, rates: &[(Currency, Rate)]) -> Rendered {
     }
 }
 
+/// The trip's summary (see [`super::report::summary`]).
+pub fn summary(trip: &TripView, summary: String) -> Rendered {
+    let id = trip.trip.id;
+    let mut keyboard = rows(vec![button(id, "📤 Export", &Action::Export)], 1);
+    keyboard.push(back(id, Page::Home));
+    Rendered {
+        text: summary,
+        keyboard: InlineKeyboardMarkup::new(keyboard),
+    }
+}
+
+/// Whether to end the trip.
+pub fn confirm_end(trip: &TripView) -> Rendered {
+    let id = trip.trip.id;
+    let text = format!(
+        "🏁 End {}?\n{}",
+        bold(&escape(&trip.trip.name)),
+        escape(
+            "Its summary will be posted here, and only settlements can be added afterwards. Its \
+             creator can reopen it."
+        )
+    );
+    let keyboard = rows(
+        vec![
+            button(id, "🏁 End it", &Action::End),
+            button(id, "⬅️ Back", &Action::Show(Page::Home)),
+        ],
+        2,
+    );
+    Rendered {
+        text,
+        keyboard: InlineKeyboardMarkup::new(keyboard),
+    }
+}
+
 /// The trips a chat without an active trip can log to.
 pub fn choose(trips: &[Trip]) -> Rendered {
     let text = escape("No trip here yet. Pick one of yours, or start one with /trip new <name>");
@@ -661,6 +721,11 @@ mod tests {
             Action::RemoveRate(inr()),
             Action::Ask(Field::Person),
             Action::Ask(Field::Rate),
+            Action::Show(Page::Summary),
+            Action::Show(Page::ConfirmEnd),
+            Action::End,
+            Action::Reopen,
+            Action::Export,
         ];
         for action in actions {
             let data = data(123, &action);

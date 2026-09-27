@@ -143,6 +143,7 @@ pub async fn handle_command(
         Command::Spent(args) => drafts::spent(&bot, &ctx, &msg, &user, &args).await,
         Command::Balance => panel::balance(&bot, &ctx, &msg).await,
         Command::Settle(args) => panel::settle(&bot, &ctx, &msg, &user, &args).await,
+        Command::Export => panel::export_command(&bot, &ctx, &msg).await,
     }
 }
 

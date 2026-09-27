@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use teloxide::{
     prelude::*,
-    types::{MessageId, ParseMode, ReplyParameters, User},
+    types::{InputFile, MessageId, ParseMode, ReplyParameters, User},
     utils::html::{bold, escape},
 };
 
@@ -13,6 +13,7 @@ use super::{Toast, current_settings, drafts, edit, reply, reply_error, reply_wit
 use crate::{
     bot::AssistantBot,
     context::AppContext,
+    db::entities::trips::TripStatus,
     modules::{
         HandlerResult,
         trips::{
@@ -20,6 +21,7 @@ use crate::{
             command::{self, SETTLE_USAGE, TRIP_USAGE, TripCommand},
             draft::Draft,
             panel::{self as pages, Action, Field, Page, Rendered},
+            report,
             service::{self, TripView, TripsError},
         },
     },
@@ -87,6 +89,26 @@ pub async fn trip(
             }
             .await
         }
+        TripCommand::End => match service::require_active(db, chat).await {
+            Ok(trip) => {
+                return match end(bot, ctx, &trip, user.id, msg).await {
+                    Ok(_) => Ok(()),
+                    Err(error) => match error.downcast::<TripsError>() {
+                        Ok(error) => reply_error(bot, msg, error).await,
+                        Err(error) => Err(error),
+                    },
+                };
+            }
+            Err(error) => Err(error),
+        },
+        TripCommand::Reopen => {
+            async {
+                let trip = service::require_active(db, chat).await?;
+                service::set_status(db, &trip, user.id, TripStatus::Active).await?;
+                Ok(escape(&format!("↩️ Reopened {}", trip.trip.name)))
+            }
+            .await
+        }
         TripCommand::Add { name } => {
             async {
                 let trip = service::require_active(db, chat).await?;
@@ -101,6 +123,34 @@ pub async fn trip(
     };
     match result {
         Ok(text) => reply(bot, msg, text).await,
+        Err(error) => reply_error(bot, msg, error).await,
+    }
+}
+
+/// Ends the trip and posts its summary in reply to `msg`; returns the ended
+/// trip.
+async fn end(
+    bot: &AssistantBot,
+    ctx: &AppContext,
+    trip: &TripView,
+    user: UserId,
+    msg: &Message,
+) -> anyhow::Result<TripView> {
+    service::set_status(&ctx.db, trip, user, TripStatus::Ended).await?;
+    let ended = service::load(&ctx.db, trip.trip.id).await?;
+    let text = format!(
+        "🏁 {} has ended. Reopen it from /trip if needed.\n\n{}",
+        bold(&escape(&ended.trip.name)),
+        summary(ctx, &ended).await?
+    );
+    reply(bot, msg, text).await?;
+    Ok(ended)
+}
+
+/// `/export`: the trip's entries as a CSV file.
+pub async fn export_command(bot: &AssistantBot, ctx: &AppContext, msg: &Message) -> HandlerResult {
+    match service::require_active(&ctx.db, msg.chat.id).await {
+        Ok(trip) => export(bot, ctx, &trip, msg.chat.id).await,
         Err(error) => reply_error(bot, msg, error).await,
     }
 }
@@ -184,7 +234,53 @@ async fn render(
             trip,
             &service::switchable(db, chat.id, chat.is_private(), user).await?,
         ),
+        Page::Summary => pages::summary(trip, summary(ctx, trip).await?),
+        Page::ConfirmEnd => pages::confirm_end(trip),
     })
+}
+
+/// The trip's summary, as HTML.
+async fn summary(ctx: &AppContext, trip: &TripView) -> Result<String, TripsError> {
+    let entries = service::entries(&ctx.db, &trip.trip).await?;
+    let balances = service::balances(&trip.trip, &entries)?;
+    Ok(report::summary(
+        trip,
+        &entries,
+        &balances,
+        &current_settings(ctx),
+        today(ctx),
+    ))
+}
+
+/// Sends the trip's entries as a CSV file.
+async fn export(
+    bot: &AssistantBot,
+    ctx: &AppContext,
+    trip: &TripView,
+    chat: ChatId,
+) -> anyhow::Result<()> {
+    let entries = service::entries(&ctx.db, &trip.trip).await?;
+    let csv = report::csv(trip, &entries, &current_settings(ctx));
+    let file = InputFile::memory(csv.into_bytes())
+        .file_name(format!("{}.csv", file_name(&trip.trip.name)));
+    bot.send_document(chat, file)
+        .caption(format!("📤 {}: {} entries", trip.trip.name, entries.len()))
+        .await?;
+    Ok(())
+}
+
+/// A file name for a trip: `Goa 2026!` → `goa-2026`.
+fn file_name(name: &str) -> String {
+    let words: Vec<String> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if words.is_empty() {
+        "trip".to_string()
+    } else {
+        words.join("-")
+    }
 }
 
 /// Sends a page of the panel in reply to `msg`.
@@ -285,6 +381,22 @@ pub async fn press(
         Action::Ask(field) => {
             ask(bot, ctx, &trip, message, user, field).await?;
             return Ok(Toast::new("✍️ Reply to the question"));
+        }
+        Action::End => {
+            let ended = end(bot, ctx, &trip, user, message).await?;
+            show(bot, ctx, message, &ended, Page::Home, user).await?;
+            return Ok(Toast::new(format!("🏁 Ended {}", ended.trip.name)));
+        }
+        Action::Reopen => {
+            service::set_status(db, &trip, user, TripStatus::Active).await?;
+            (
+                Page::Home,
+                Toast::new(format!("↩️ Reopened {}", trip.trip.name)),
+            )
+        }
+        Action::Export => {
+            export(bot, ctx, &trip, chat.id).await?;
+            return Ok(Toast::none());
         }
     };
     show(bot, ctx, message, &trip, page, user).await?;
@@ -387,5 +499,17 @@ pub async fn handle_input(
             prompts::clean_up(&bot, &msg, &prompt, "").await?;
             reply_error(&bot, &msg, error).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_names_are_slugs() {
+        assert_eq!(file_name("Goa 2026!"), "goa-2026");
+        assert_eq!(file_name("Tour de France"), "tour-de-france");
+        assert_eq!(file_name("🏖"), "trip");
     }
 }

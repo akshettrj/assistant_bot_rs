@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod model;
 pub mod money;
 pub mod panel;
+pub mod report;
 pub mod service;
 pub mod settings;
 mod telegram;
@@ -53,6 +54,8 @@ enum Command {
     Balance,
     #[command(description = "settle up, or log a payment: /settle 500 to Ann")]
     Settle(String),
+    #[command(description = "the trip's entries as a CSV file")]
+    Export,
 }
 
 pub struct TripsModule;
