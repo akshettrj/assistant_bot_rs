@@ -56,7 +56,7 @@ impl Field {
             Self::Description => "What was it? e.g. dinner at the beach",
             Self::Payers => "Who paid how much? e.g. Ann 1000, Bob 1400",
             Self::Shares => "Who counts for how much? e.g. Ann 2, Bob 1",
-            Self::Exact => "Who owes how much? e.g. Ann 700, Bob 300",
+            Self::Exact => "Who owes how much? e.g. Ann 700, Bob 300, or Ann 700, Bob rest",
             Self::Date => "When? e.g. yesterday, friday, 20 Sep or 2026-09-20",
             Self::Currency => "Which currency? e.g. USD, EUR, THB",
             Self::Rate => "How much of the trip's currency is one unit worth? e.g. 83.25",
@@ -330,6 +330,12 @@ fn details(
             .map(|share| {
                 let weight = match (&draft.split, share.weight) {
                     (Split::Shares { .. }, Some(weight)) => format!(" ×{weight}"),
+                    (
+                        Split::Exact {
+                            rest: Some(rest), ..
+                        },
+                        _,
+                    ) if *rest == share.member => " (the rest)".to_string(),
                     _ => String::new(),
                 };
                 format!(
@@ -635,6 +641,30 @@ mod tests {
             text,
             "🧾 <b>dinner &amp; drinks</b> · Goa &lt;3\n📦 Other · Sat 26 Sep\n💰 <b>100.00 \
              INR</b>\n👛 Paid by Ann\n➗ Split equally: Ann 33.34 · Bob 33.33 · Mom 33.33"
+        );
+    }
+
+    #[test]
+    fn the_card_shows_who_owes_the_rest() {
+        let trip = goa();
+        let mut draft = Draft::expense("snacks", inr(), dec!(140), 1, vec![]);
+        draft.split = Split::Exact {
+            amounts: vec![crate::modules::trips::draft::Part {
+                member: 3,
+                amount: dec!(30),
+            }],
+            rest: Some(2),
+        };
+        let text = text(
+            &trip,
+            &draft,
+            &checked(&trip, &draft),
+            &TripsSettings::default(),
+            today(),
+        );
+        assert!(
+            text.contains("➗ Split exactly: Mom 30.00 · Bob (the rest) 110.00"),
+            "{text}"
         );
     }
 

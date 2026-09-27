@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 
 use super::{
     card::Field,
-    draft::{DateSpec, Draft, Part, Split},
+    draft::{DateSpec, Draft, MemberId, Part, Split},
     money::{Currency, Rate},
     service::TripView,
 };
@@ -275,9 +275,8 @@ pub fn apply_answer(
             };
         }
         Field::Exact => {
-            draft.split = Split::Exact {
-                amounts: parse_parts(text, trip)?,
-            };
+            let (amounts, rest) = parse_exact(text, trip)?;
+            draft.split = Split::Exact { amounts, rest };
         }
         Field::Date => draft.date = parse_date(text, today)?,
         Field::Currency => {
@@ -360,6 +359,50 @@ pub fn parse_parts(text: &str, trip: &TripView) -> Result<Vec<Part>, String> {
             })
         })
         .collect()
+}
+
+/// Words for what is left of a total: "Bob rest". Longest first, so that
+/// "the rest" is found whole.
+const REST_WORDS: &[&str] = &["what's left", "the rest", "remainder", "remaining", "rest"];
+
+/// Whether `text` means what is left of a total.
+pub fn is_rest(text: &str) -> bool {
+    let text = text.trim().to_lowercase();
+    REST_WORDS.contains(&text.as_str())
+}
+
+/// Exact amounts, one of which may be the rest: `Ann 700, Bob rest`.
+pub fn parse_exact(text: &str, trip: &TripView) -> Result<(Vec<Part>, Option<MemberId>), String> {
+    let mut rest = None;
+    let mut given = Vec::new();
+    for item in split_items(text)
+        .into_iter()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let owes_rest = REST_WORDS.iter().find_map(|word| {
+            let (name, end) = item.split_at_checked(item.len().checked_sub(word.len())?)?;
+            (end.eq_ignore_ascii_case(word) && name.ends_with(char::is_whitespace))
+                .then(|| name.trim().trim_end_matches([':', '=']).trim())
+        });
+        match owes_rest {
+            Some(name) => {
+                let member = trip
+                    .find_by_name(name)
+                    .ok_or_else(|| format!("who is {name}? The trip has {}", names(trip)))?;
+                if rest.replace(member.id).is_some() {
+                    return Err("only one person can owe the rest".to_string());
+                }
+            }
+            None => given.push(item),
+        }
+    }
+    let amounts = if given.is_empty() {
+        Vec::new()
+    } else {
+        parse_parts(&given.join("\n"), trip)?
+    };
+    Ok((amounts, rest))
 }
 
 /// Splits on newlines, semicolons, and commas not followed by a digit (which
@@ -563,6 +606,26 @@ mod tests {
         assert_eq!(parts, [(1, dec!(1000)), (2, dec!(1400)), (3, dec!(2.5))]);
         let parts = parse_parts("Ann 1,000,Bob 5", &goa()).unwrap();
         assert_eq!(parts[1].amount, dec!(5));
+    }
+
+    #[test]
+    fn exact_amounts_may_leave_the_rest_to_one() {
+        let (amounts, rest) = parse_exact("Ann 700, Bob rest", &goa()).unwrap();
+        assert_eq!(
+            amounts,
+            [Part {
+                member: 1,
+                amount: dec!(700)
+            }]
+        );
+        assert_eq!(rest, Some(2));
+        let (amounts, rest) = parse_exact("Mom: the rest\nAnn 1,000", &goa()).unwrap();
+        assert_eq!((amounts.len(), rest), (1, Some(3)));
+        assert_eq!(parse_exact("Ann 5, Bob 6", &goa()).unwrap().1, None);
+        assert!(parse_exact("Ann rest, Bob rest", &goa()).is_err());
+        assert!(parse_exact("Zed rest", &goa()).is_err());
+        assert!(is_rest(" Remaining "));
+        assert!(!is_rest("rest of it"));
     }
 
     #[test]

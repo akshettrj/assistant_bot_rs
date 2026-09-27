@@ -565,8 +565,10 @@ fn draft_of(record: &EntryRecord) -> Result<Draft> {
         SplitMethod::Shares => Split::Shares {
             weights: parts(|share| share.weight.map(|weight| weight.0))?,
         },
+        // Each amount, the rest included, was stored.
         SplitMethod::Exact => Split::Exact {
             amounts: parts(|share| share.exact.map(|exact| exact.0))?,
+            rest: None,
         },
     };
     let rate = match entry.rate_source {

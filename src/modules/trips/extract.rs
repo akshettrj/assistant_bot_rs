@@ -121,8 +121,11 @@ pub fn instructions(trip: &TripView, sender: &Member, categories: &[Category]) -
          anything, and do not work out anyone's share: that is done elsewhere. Every amount you \
          give must be copied character for character from the message (e.g. \"2,400\" or \
          \"30.50\"), without currency symbols. If the message gives no amount for something, use \
-         null.\n\nThe sender is \"{ME}\"; \"I\", \"me\" and \"my\" mean them. The other people on \
-         the trip are: {others}. Use \"{ME}\" or one of these names, as the message refers to \
+         null. The message is complete: work only from what it says.\n\nPaying is not owing: who \
+         paid is whose money went out; the split is what each person bought or consumed. \"Ann's \
+         total was 30\" or \"Ann had 30\" is Ann's part of the split, not a payment.\n\nThe \
+         sender is \"{ME}\"; \"I\", \"me\" and \"my\" mean them. The other people on the trip \
+         are: {others}. Use \"{ME}\" or one of these names, as the message refers to \
          them.\n\nFields:\n- is_expense: whether the message describes money spent. If not, set \
          it to false and the rest to null or empty.\n- description: a few words for what it was \
          (e.g. \"dinner at the beach\").\n- category: the closest of {categories}, or other.\n- \
@@ -134,7 +137,9 @@ pub fn instructions(trip: &TripView, sender: &Member, categories: &[Category]) -
          else null.\n- split: how it is shared, if the message says: \"equal\" with the people \
          who share it (no people means everyone on the trip; \"split with Ann\" means {ME} and \
          Ann), \"shares\" with each person's weight as written (\"Ann counts double\" is 2), or \
-         \"exact\" with each person's amount as written. null means everyone equally.\n- date: \
+         \"exact\" with each person's amount as written; if one person owes the rest (what is \
+         left of the total), list them with a null amount. Only the people listed share it: leave \
+         out anyone who, from the message, owes nothing. null means everyone equally.\n- date: \
          when, exactly as written (\"yesterday\", \"friday\", \"20 Sep\"), or null for today.",
         others = if others.is_empty() {
             "nobody else".to_string()
@@ -200,7 +205,8 @@ pub fn to_draft(
             split
                 .people
                 .iter()
-                .filter_map(|person| person.amount.as_deref()),
+                .filter_map(|person| person.amount.as_deref())
+                .filter(|amount| !command::is_rest(amount)),
         );
     }
     let unverified: Vec<String> = written
@@ -232,7 +238,14 @@ pub fn to_draft(
         .split
         .iter()
         .flat_map(|split| &split.people)
-        .map(|person| (resolve(&person.name), person.amount.as_deref()))
+        // "The rest" is said without an amount.
+        .map(|person| {
+            let written = person
+                .amount
+                .as_deref()
+                .filter(|amount| !command::is_rest(amount));
+            (resolve(&person.name), written)
+        })
         .collect();
     if !strangers.is_empty() {
         strangers.dedup();
@@ -318,9 +331,26 @@ pub fn to_draft(
             SplitMethodSaid::Shares => Split::Shares {
                 weights: weighted(&people)?,
             },
-            SplitMethodSaid::Exact => Split::Exact {
-                amounts: weighted(&people)?,
-            },
+            // One person may owe the rest, left without an amount.
+            SplitMethodSaid::Exact => {
+                let (rest, given): (Vec<_>, Vec<_>) = people
+                    .iter()
+                    .copied()
+                    .partition(|(_, written)| written.is_none());
+                let rest = match rest.as_slice() {
+                    [] => None,
+                    [(member, _)] => *member,
+                    _ => {
+                        return Err(Rejection::Unreadable(
+                            "I didn't find everyone's part of the split".into(),
+                        ));
+                    }
+                };
+                Split::Exact {
+                    amounts: weighted(&given)?,
+                    rest,
+                }
+            }
         },
     };
 
@@ -573,6 +603,65 @@ mod tests {
         .unwrap();
         assert_eq!(checked.base_total.amount(), dec!(2400));
         assert_eq!(checked.shares[0].base.amount(), dec!(1600));
+    }
+
+    #[test]
+    fn paying_for_others_with_one_owing_the_rest() {
+        // "Bob paid 50, I paid 90, Mom's total was 30, Ann... the rest": as
+        // the model reads "Carol paid 50, I paid 90, Dave's total was 30,
+        // Erin's total was rest".
+        let extraction = Extraction {
+            payers: vec![named("Bob", Some("50")), named("me", Some("90"))],
+            split: Some(SplitSaid {
+                method: SplitMethodSaid::Exact,
+                people: vec![named("Mom", Some("30")), named("Bob", Some("rest"))],
+            }),
+            ..expense()
+        };
+        let message = "Bob paid 50, I paid 90, Mom's total was 30, Bob's total was rest";
+        let draft = read(&extraction, message).unwrap();
+        assert_eq!(
+            draft.split,
+            Split::Exact {
+                amounts: vec![Part {
+                    member: 3,
+                    amount: dec!(30)
+                }],
+                rest: Some(2),
+            }
+        );
+
+        let members = [1, 2, 3];
+        let checked = draft::check(
+            &draft,
+            &Context {
+                base: Currency::from_code("INR").unwrap(),
+                members: &members,
+                today: today(),
+                known_rate: None,
+            },
+        )
+        .unwrap();
+        let owed: Vec<_> = checked
+            .shares
+            .iter()
+            .map(|share| (share.member, share.base.amount()))
+            .collect();
+        assert_eq!(owed, [(3, dec!(30)), (2, dec!(110))]);
+
+        // Two people can't both owe the rest.
+        let extraction = Extraction {
+            payers: vec![named("me", Some("90"))],
+            split: Some(SplitSaid {
+                method: SplitMethodSaid::Exact,
+                people: vec![named("Mom", None), named("Bob", None)],
+            }),
+            ..expense()
+        };
+        assert!(matches!(
+            read(&extraction, "I paid 90"),
+            Err(Rejection::Unreadable(_))
+        ));
     }
 
     #[test]

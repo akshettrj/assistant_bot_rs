@@ -53,8 +53,13 @@ pub enum Split {
     Equal { members: Vec<MemberId> },
     /// In proportion to weights: a couple may count as 2.
     Shares { weights: Vec<Part> },
-    /// Exact amounts, in the entry's currency, adding up to the total.
-    Exact { amounts: Vec<Part> },
+    /// Exact amounts, in the entry's currency, adding up to the total; or
+    /// all but one, `rest`, who owes what is left.
+    Exact {
+        amounts: Vec<Part>,
+        #[serde(default)]
+        rest: Option<MemberId>,
+    },
 }
 
 impl Split {
@@ -62,9 +67,12 @@ impl Split {
     pub fn members(&self) -> Vec<MemberId> {
         match self {
             Self::Equal { members } => members.clone(),
-            Self::Shares { weights: parts } | Self::Exact { amounts: parts } => {
-                parts.iter().map(|part| part.member).collect()
-            }
+            Self::Shares { weights: parts } => parts.iter().map(|part| part.member).collect(),
+            Self::Exact { amounts, rest } => amounts
+                .iter()
+                .map(|part| part.member)
+                .chain(*rest)
+                .collect(),
         }
     }
 }
@@ -206,6 +214,12 @@ pub enum Problem {
     },
     /// A settlement is one member paying another.
     NotATransfer,
+    /// The exact amounts leave nothing for the one owing the rest.
+    NothingLeft {
+        member: MemberId,
+        split: Money,
+        total: Money,
+    },
 }
 
 impl Problem {
@@ -230,6 +244,14 @@ impl Problem {
                 format!("no exchange rate from {from} to {to}: set one")
             }
             Self::NotATransfer => "a settlement is one person paying another".to_string(),
+            Self::NothingLeft {
+                member,
+                split,
+                total,
+            } => format!(
+                "the others owe {split} of {total}, which leaves nothing for {}",
+                name(*member)
+            ),
         }
     }
 }
@@ -292,14 +314,30 @@ pub fn check(draft: &Draft, context: &Context<'_>) -> Result<Checked, Vec<Proble
             })
             .map(|part| (part.member, part.amount, None))
             .collect(),
-        Split::Exact { amounts: parts } => {
-            let exact = amounts(parts, currency, &mut problems);
-            match Money::sum(currency, exact.iter().map(|(_, amount)| *amount)) {
-                Ok(split) if split != total => {
+        Split::Exact {
+            amounts: parts,
+            rest,
+        } => {
+            let mut exact = amounts(parts, currency, &mut problems);
+            match (
+                Money::sum(currency, exact.iter().map(|(_, amount)| *amount)),
+                rest,
+            ) {
+                (Ok(split), None) if split != total => {
                     problems.push(Problem::ExactMismatch { split, total });
                 }
-                Ok(_) => {}
-                Err(error) => problems.push(error.into()),
+                // The one owing the rest owes what the others don't.
+                (Ok(split), Some(member)) => match total.checked_sub(split) {
+                    Ok(left) if left.amount() > Decimal::ZERO => exact.push((*member, left)),
+                    Ok(_) => problems.push(Problem::NothingLeft {
+                        member: *member,
+                        split,
+                        total,
+                    }),
+                    Err(error) => problems.push(error.into()),
+                },
+                (Ok(_), None) => {}
+                (Err(error), _) => problems.push(error.into()),
             }
             exact
                 .into_iter()
@@ -514,6 +552,7 @@ mod tests {
 
         draft.split = Split::Exact {
             amounts: vec![part(ANN, dec!(70)), part(CAT, dec!(30))],
+            rest: None,
         };
         let checked = check(&draft, &context()).unwrap();
         assert_eq!(bases(&checked).1, [dec!(70), dec!(30)]);
@@ -522,10 +561,35 @@ mod tests {
 
         draft.split = Split::Exact {
             amounts: vec![part(ANN, dec!(70))],
+            rest: None,
         };
         assert!(matches!(
             check(&draft, &context()).unwrap_err()[..],
             [Problem::ExactMismatch { .. }]
+        ));
+    }
+
+    #[test]
+    fn one_member_may_owe_the_rest() {
+        // Ann paid 50 and Bob 90; Cat had 30, and Bob the rest.
+        let mut draft = dinner();
+        draft.payers = vec![part(ANN, dec!(50)), part(BOB, dec!(90))];
+        draft.split = Split::Exact {
+            amounts: vec![part(CAT, dec!(30))],
+            rest: Some(BOB),
+        };
+        assert_eq!(draft.split.members(), [CAT, BOB]);
+        let checked = check(&draft, &context()).unwrap();
+        assert_eq!(bases(&checked).1, [dec!(30), dec!(110)]);
+        assert_eq!(checked.shares[1].exact.unwrap().amount(), dec!(110));
+
+        draft.split = Split::Exact {
+            amounts: vec![part(CAT, dec!(140))],
+            rest: Some(BOB),
+        };
+        assert!(matches!(
+            check(&draft, &context()).unwrap_err()[..],
+            [Problem::NothingLeft { member: BOB, .. }]
         ));
     }
 
