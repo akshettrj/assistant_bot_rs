@@ -9,9 +9,10 @@ use teloxide::{
 };
 
 use super::{
-    Toast, current_settings, edit, for_user, rates, reply, reply_error, reply_with, today,
+    Toast, current_settings, edit, for_user, messages, rates, reply, reply_error, reply_with, today,
 };
 use crate::{
+    ai,
     bot::AssistantBot,
     context::AppContext,
     db::entities::entries::EntryKind,
@@ -113,6 +114,20 @@ pub async fn show_card(
     Ok(())
 }
 
+/// Shows the draft's current state on its card `message` in `chat`.
+pub async fn refresh_card(
+    bot: &AssistantBot,
+    ctx: &AppContext,
+    state: &TripsState,
+    trip: &TripView,
+    stored: &StoredDraft,
+    chat: ChatId,
+    message: MessageId,
+) -> HandlerResult {
+    let (text, keyboard) = render(ctx, state, trip, stored, View::Main).await?;
+    edit(bot, chat, message, text, Some(keyboard)).await
+}
+
 /// The card of `stored` showing `view`.
 async fn render(
     ctx: &AppContext,
@@ -131,6 +146,7 @@ async fn render(
         categories: &categories,
         currencies: &currencies,
         today,
+        ai: ctx.ai.is_some() && ai::may_use(&ctx.settings.current(), stored.author),
     };
     Ok((
         card::text(trip, &stored.draft, &outcome, &settings, today),
@@ -322,6 +338,21 @@ pub async fn handle_input(
     }
 
     let text = msg.text().unwrap_or_default();
+    if data.field == Field::Ai {
+        ctx.prompts.finish(chat, user);
+        let stored = match service::find_draft(&ctx.db, data.draft).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                return reply(&bot, &msg, format!("❌ {}", escape(&for_user(error)?))).await;
+            }
+        };
+        let Some(sender) = msg.from.clone() else {
+            return Ok(());
+        };
+        messages::correct(&bot, &ctx, &state, &msg, &sender, stored, data.card, text).await?;
+        prompts::clean_up(&bot, &msg, &prompt, "").await?;
+        return Ok(());
+    }
     let result = async {
         let mut stored = service::find_draft(&ctx.db, data.draft).await?;
         let trip = service::load(&ctx.db, stored.trip_id).await?;

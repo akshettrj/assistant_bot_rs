@@ -47,6 +47,8 @@ pub enum Field {
     Date,
     Currency,
     Rate,
+    /// What to change, in plain words, for the AI.
+    Ai,
 }
 
 impl Field {
@@ -61,6 +63,9 @@ impl Field {
             Self::Date => "When? e.g. yesterday, friday, 20 Sep or 2026-09-20",
             Self::Currency => "Which currency? e.g. USD, EUR, THB",
             Self::Rate => "How much of the trip's currency is one unit worth? e.g. 83.25",
+            Self::Ai => {
+                "What should change? e.g. \"Mom wasn't there\" or \"it was 2600, Bob paid\""
+            }
         }
     }
 
@@ -75,10 +80,11 @@ impl Field {
             Self::Date => "yesterday",
             Self::Currency => "USD",
             Self::Rate => "83.25",
+            Self::Ai => "Mom wasn't there",
         }
     }
 
-    const ALL: [(Self, &'static str); 8] = [
+    const ALL: [(Self, &'static str); 9] = [
         (Self::Amount, "amount"),
         (Self::Description, "what"),
         (Self::Payers, "payers"),
@@ -87,6 +93,7 @@ impl Field {
         (Self::Date, "date"),
         (Self::Currency, "currency"),
         (Self::Rate, "rate"),
+        (Self::Ai, "ai"),
     ];
 }
 
@@ -511,6 +518,8 @@ pub struct Choices<'a> {
     /// Currencies offered besides the trip's: those with a fixed rate.
     pub currencies: &'a [Currency],
     pub today: NaiveDate,
+    /// Whether the draft's author may have the AI change it.
+    pub ai: bool,
 }
 
 /// The card's buttons in `view`.
@@ -548,6 +557,13 @@ pub fn keyboard(
                     id,
                     "🏷 Category",
                     &Action::Show(View::Category),
+                )]);
+            }
+            if choices.ai {
+                rows.push(vec![button(
+                    id,
+                    "🤖 Change with AI…",
+                    &Action::Ask(Field::Ai),
                 )]);
             }
             rows.push(vec![
@@ -779,6 +795,7 @@ mod tests {
             Action::Date(DateSpec::On(today())),
             Action::Currency(inr()),
             Action::Ask(Field::Exact),
+            Action::Ask(Field::Ai),
         ];
         for action in actions {
             let data = data(2_147_483_647, &action);
@@ -910,6 +927,7 @@ mod tests {
             categories: &categories,
             currencies: &[Currency::from_code("USD").unwrap()],
             today: today(),
+            ai: true,
         };
         let labels = |view| {
             keyboard(&trip, 7, &draft, view, &choices)
@@ -925,5 +943,6 @@ mod tests {
         assert!(labels(View::Category).contains(&"• 📦 Other".to_string()));
         assert!(labels(View::Currency).starts_with(&["• INR".to_string(), "USD".to_string()]));
         assert_eq!(labels(View::Date)[2], "Thu 24");
+        assert!(labels(View::Main).contains(&"🤖 Change with AI…".to_string()));
     }
 }

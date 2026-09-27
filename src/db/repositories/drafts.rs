@@ -49,6 +49,22 @@ pub async fn find(
         .await
 }
 
+/// The draft shown on card `message` in `chat`, unless it has expired by
+/// `now`.
+pub async fn find_by_card(
+    db: &impl ConnectionTrait,
+    chat: ChatId,
+    message: MessageId,
+    now: DateTime<Utc>,
+) -> Result<Option<drafts::Model>, DbErr> {
+    Drafts::find()
+        .filter(drafts::Column::ChatId.eq(chat.0))
+        .filter(drafts::Column::MessageId.eq(message.0))
+        .filter(drafts::Column::ExpiresAt.gt(now))
+        .one(db)
+        .await
+}
+
 pub async fn update_json(db: &impl ConnectionTrait, id: i32, json: &str) -> Result<(), DbErr> {
     drafts::ActiveModel {
         id: Unchanged(id),
@@ -133,6 +149,16 @@ mod tests {
             .unwrap();
         set_message(&db, draft.id, MessageId(42)).await.unwrap();
         let found = find(&db, draft.id, now).await.unwrap().unwrap();
+        let by_card = find_by_card(&db, ChatId(-100), MessageId(42), now)
+            .await
+            .unwrap();
+        assert_eq!(by_card.map(|draft| draft.id), Some(draft.id));
+        assert!(
+            find_by_card(&db, ChatId(-100), MessageId(43), now)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(found.json, r#"{"total":"10"}"#);
         assert_eq!(found.message_id, Some(42));
 

@@ -347,6 +347,28 @@ pub async fn find_draft(db: &DatabaseConnection, id: i32) -> Result<StoredDraft>
     let stored = drafts::find(db, id, Utc::now())
         .await?
         .ok_or(TripsError::DraftExpired)?;
+    stored_draft(stored)
+}
+
+/// The draft shown on card `message` in `chat`, if there is one and it
+/// hasn't expired.
+pub async fn find_draft_by_card(
+    db: &DatabaseConnection,
+    chat: ChatId,
+    message: MessageId,
+) -> Result<Option<StoredDraft>> {
+    match drafts::find_by_card(db, chat, message, Utc::now()).await? {
+        Some(stored) => match stored_draft(stored) {
+            Ok(stored) => Ok(Some(stored)),
+            Err(TripsError::DraftExpired) => Ok(None),
+            Err(error) => Err(error),
+        },
+        None => Ok(None),
+    }
+}
+
+fn stored_draft(stored: crate::db::entities::drafts::Model) -> Result<StoredDraft> {
+    let id = stored.id;
     Ok(StoredDraft {
         id: stored.id,
         trip_id: stored.trip_id,

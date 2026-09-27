@@ -6,22 +6,22 @@ use std::sync::Arc;
 
 use teloxide::{
     prelude::*,
-    types::{Me, User},
+    types::{Me, MessageId, User},
     utils::html::escape,
 };
 
 use super::{current_settings, drafts, edit, reply, reply_error, reply_with, today};
 use crate::{
-    ai,
+    ai::{self, Llm},
     bot::AssistantBot,
     context::AppContext,
     modules::{
         HandlerResult,
         trips::{
             TripsState,
-            extract::{self, Reading, Sources},
+            extract::{self, Reading, Rejection, Sources},
             model, service,
-            service::TripsError,
+            service::{StoredDraft, TripsError},
         },
     },
 };
@@ -71,8 +71,21 @@ pub async fn read_keyword(
     read(&bot, &ctx, &state, &msg, &user, &text).await
 }
 
+/// The AI, if `user` may use it; else why not.
+fn llm_for(ctx: &AppContext, user: &User) -> Result<Arc<dyn Llm>, &'static str> {
+    let llm = ctx
+        .ai
+        .clone()
+        .ok_or("❌ The AI isn't set up: see [ai] in the configuration. Use /spent instead.")?;
+    if ai::may_use(&ctx.settings.current(), user.id) {
+        Ok(llm)
+    } else {
+        Err("❌ Only the owner, the sudo users and ai.users may use the AI. Use /spent instead.")
+    }
+}
+
 /// Reads `text` into a draft card, shown in place of a "Reading…"
-/// placeholder.
+/// placeholder; or, in reply to a draft's card, corrects that draft.
 pub async fn read(
     bot: &AssistantBot,
     ctx: &AppContext,
@@ -81,18 +94,18 @@ pub async fn read(
     user: &User,
     text: &str,
 ) -> HandlerResult {
-    let Some(llm) = ctx.ai.clone() else {
-        let text = "❌ The AI isn't set up: see [ai] in the configuration. Use /spent instead.";
-        return reply(bot, msg, escape(text)).await;
+    let llm = match llm_for(ctx, user) {
+        Ok(llm) => llm,
+        Err(problem) => return reply(bot, msg, escape(problem)).await,
     };
-    if !ai::may_use(&ctx.settings.current(), user.id) {
-        let text =
-            "❌ Only the owner, the sudo users and ai.users may use the AI. Use /spent instead.";
-        return reply(bot, msg, escape(text)).await;
-    }
     let text = text.trim();
     if text.is_empty() {
         return reply(bot, msg, escape(AI_USAGE)).await;
+    }
+    if let Some(card) = msg.reply_to_message()
+        && let Some(stored) = service::find_draft_by_card(&ctx.db, msg.chat.id, card.id).await?
+    {
+        return correct(bot, ctx, state, msg, user, stored, card.id, text).await;
     }
     let trip = match service::require_active(&ctx.db, msg.chat.id).await {
         Ok(trip) => trip,
@@ -159,6 +172,81 @@ pub async fn read(
         (true, false) => {
             let text = format!("❌ {}", escape(&refused.join("\n")));
             reply(bot, msg, text).await
+        }
+    }
+}
+
+/// Has the AI rewrite the draft on `card` as `text` says ("Mom wasn't
+/// there", "it was 2600"). Its numbers may come from `text` or from the draft.
+#[allow(clippy::too_many_arguments)] // The handler's context, and the draft's.
+pub async fn correct(
+    bot: &AssistantBot,
+    ctx: &AppContext,
+    state: &TripsState,
+    msg: &Message,
+    user: &User,
+    mut stored: StoredDraft,
+    card: MessageId,
+    text: &str,
+) -> HandlerResult {
+    let llm = match llm_for(ctx, user) {
+        Ok(llm) => llm,
+        Err(problem) => return reply(bot, msg, escape(problem)).await,
+    };
+    let trip = service::load(&ctx.db, stored.trip_id).await?;
+    if user.id != stored.author {
+        let author = trip
+            .member_of(stored.author)
+            .map_or("its author".to_string(), |member| member.name.clone());
+        let text = format!("❌ Only {author} can change this draft");
+        return reply(bot, msg, escape(&text)).await;
+    }
+    let Some(sender) = trip.member_of(user.id).cloned() else {
+        let error = TripsError::NotAMember(trip.trip.name.clone());
+        return reply_error(bot, msg, error).await;
+    };
+
+    let working = reply_with(bot, msg, "🤔 Updating the card…".to_string(), None).await?;
+    let today = today(ctx);
+    let categories = model::categories(&current_settings(ctx));
+    let current = extract::describe_for_correction(&stored.draft, &trip, today);
+    let request = ai::Request {
+        system: extract::correction_instructions(&trip, &sender, &categories, &current),
+        text: text.to_string(),
+        schema: extract::schema(&categories),
+        model: ctx.settings.current().config.ai.model.clone(),
+    };
+    let sources = Sources {
+        message: text,
+        card: Some(&current),
+    };
+    let corrected = match ai::extract::<Reading>(llm.as_ref(), &request).await {
+        Ok(reading) => extract::to_drafts(&reading, sources, &trip, &sender, &categories, today)
+            .and_then(|drafts| drafts.into_iter().next().ok_or(Rejection::NotAnExpense)?)
+            .map_err(|rejection| rejection.to_string()),
+        Err(error) => {
+            tracing::warn!(%error, "the AI couldn't read a correction");
+            Err(error.to_string())
+        }
+    };
+
+    match corrected {
+        Ok(mut draft) => {
+            draft.replaces = stored.draft.replaces;
+            stored.draft = draft;
+            service::update_draft(&ctx.db, &stored).await?;
+            drafts::refresh_card(bot, ctx, state, &trip, &stored, stored.chat, card).await?;
+            // Best effort: the card says it all.
+            let _ = bot.delete_message(working.chat.id, working.id).await;
+            Ok(())
+        }
+        Err(problem) => {
+            let text = format!(
+                "❌ {}\n{}",
+                escape(&problem),
+                escape("The card is unchanged: change it with its buttons instead.")
+            );
+            edit(bot, working.chat.id, working.id, text, None).await
         }
     }
 }

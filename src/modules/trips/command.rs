@@ -315,6 +315,8 @@ pub fn apply_answer(
             draft.rate = Some(rate);
             draft.rate_source = None;
         }
+        // Read by the AI, not here.
+        Field::Ai => return Err("that's for the AI to read".to_string()),
     }
     Ok(())
 }

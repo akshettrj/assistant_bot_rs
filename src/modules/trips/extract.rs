@@ -643,9 +643,26 @@ fn continues(mut chars: impl Iterator<Item = char>) -> bool {
     }
 }
 
+/// The instructions for correcting the entry described by `current` (see
+/// [`describe_for_correction`]) with a message from `sender`.
+pub fn correction_instructions(
+    trip: &TripView,
+    sender: &Member,
+    categories: &[Category],
+    current: &str,
+) -> String {
+    format!(
+        "{}\n\nThis message corrects an entry already drafted. Give exactly one entry: the whole \
+         entry as the message changes it, keeping what the message doesn't change. Numbers may be \
+         copied from the message or from the entry. The entry, with the sender under their own \
+         name, is:\n{current}",
+        instructions(trip, sender, categories)
+    )
+}
+
 /// A draft as text the AI can correct, and whose numbers a correction may
 /// reuse.
-pub fn describe_for_correction(draft: &Draft, trip: &TripView) -> String {
+pub fn describe_for_correction(draft: &Draft, trip: &TripView, today: NaiveDate) -> String {
     let name = |member: MemberId| trip.name(member);
     let amount = |amount: &Amount| match amount {
         Amount::Literal { value } => value.to_string(),
@@ -677,14 +694,14 @@ pub fn describe_for_correction(draft: &Draft, trip: &TripView) -> String {
         Group::Payers => "those who paid".to_string(),
     };
     let mut lines = vec![format!(
-        "{} \"{}\" in {}, {:?}",
+        "{} \"{}\" in {}, on {}",
         match draft.kind {
             EntryKind::Expense => "Expense",
             EntryKind::Settlement => "Settlement",
         },
         draft.description,
         draft.currency,
-        draft.date
+        draft.date.resolve(today)
     )];
     lines.extend(draft.claims.iter().map(|claim| match claim {
         Claim::Paid { who, amount: paid } => format!("{} paid {}", name(*who), amount(paid)),
@@ -984,26 +1001,46 @@ mod tests {
     fn corrections_may_reuse_the_cards_numbers() {
         let trip = goa();
         let categories = model::categories(&TripsSettings::default());
-        let card = "Expense \"dinner\" in INR\nme paid 2400";
-        let answer: Reading = serde_json::from_value(json!({"entries": [entry(vec![
-            with(claim("paid"), json!({"person": "me", "amount": number("2400")})),
-            with(claim("excluded"), json!({"group": {"who": "only", "names": ["Erin"]}})),
-        ])]}))
-        .unwrap();
-        let sources = Sources {
-            message: "Erin wasn't there",
-            card: Some(card),
+        let current = Draft::expense("dinner", trip.trip.base, dec!(2400), 1);
+        let card = describe_for_correction(&current, &trip, today());
+        assert_eq!(
+            card,
+            "Expense \"dinner\" in INR, on 2026-09-26\nFrank paid 2400"
+        );
+        let correct = |paid: &str| {
+            let answer: Reading = serde_json::from_value(json!({"entries": [entry(vec![
+                with(claim("paid"), json!({"person": "Frank", "amount": number(paid)})),
+                with(claim("excluded"), json!({"group": {"who": "only", "names": ["Erin"]}})),
+            ])]}))
+            .unwrap();
+            let sources = Sources {
+                message: "Erin wasn't there",
+                card: Some(&card),
+            };
+            to_drafts(
+                &answer,
+                sources,
+                &trip,
+                &trip.members[0],
+                &categories,
+                today(),
+            )
+            .unwrap()
+            .remove(0)
         };
-        let drafts = to_drafts(
-            &answer,
-            sources,
-            &trip,
-            &trip.members[0],
-            &categories,
-            today(),
-        )
-        .unwrap();
-        assert!(drafts[0].is_ok());
+        let corrected = correct("2400").unwrap();
+        assert!(
+            corrected
+                .claims
+                .contains(&Claim::Excluded { members: vec![4] })
+        );
+        // Still no invented numbers.
+        assert_eq!(
+            correct("2500"),
+            Err(Rejection::Unverified(vec!["2500".into()]))
+        );
+        let text = correction_instructions(&trip, &trip.members[0], &categories, &card);
+        assert!(text.ends_with(&card), "{text}");
     }
 
     #[test]

@@ -338,7 +338,10 @@ me, Bob's pasta 400, a 200 starter for all but Mom, plus 10% service",
 "museum 300 each for the three of us", "Ann counts double", "30 USD at 84",
 several expenses in one message, and settlements ("Bob sent me 200"). Each
 lands on a draft card marked 🤖 with the working shown, which you check and
-save as usual; anything the AI couldn't place is listed on the card. It never
+save as usual; anything the AI couldn't place is listed on the card. To fix a
+card in words, reply to it with `/ai Mom wasn't there` (or press its 🤖
+Change with AI… button): the AI rewrites that draft, and may reuse its numbers
+as well as the new message's. It never
 does the maths: any number it gives that isn't written in your message is
 refused, and every total, share and conversion is computed by the bot.
 
