@@ -113,3 +113,18 @@ action = "brightness 100"
 fade = "15m"
 # Paused schedules stay configured but don't run.
 enabled = false
+
+# Shared trip expenses (/trip, /spent): who paid, who owes, and settling up.
+# Allow it in a group with `telegram.allowed_chats.trips = [<group id>]`.
+[modules.trips]
+# Runtime. The currency of new trips when `/trip new` names none.
+# default_currency = "INR"
+# Runtime. Whether expenses logged in a private chat are announced in the
+# trip's chat.
+notify_home_chat = true
+
+# Runtime. Extra expense categories besides food, transport, stay, activities,
+# shopping, health and other: an id (for `/spent 500 visa fee #visa`) and a
+# label with an emoji.
+[modules.trips.categories]
+# visa = "🛂 Visa"

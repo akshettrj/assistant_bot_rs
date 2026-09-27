@@ -623,10 +623,10 @@ mod tests {
         };
 
         // The settings module can't be turned off.
-        assert_eq!(choices("modules.disabled"), ["general", "lights"]);
+        assert_eq!(choices("modules.disabled"), ["general", "lights", "trips"]);
         assert_eq!(
             choices("telegram.allowed_users"),
-            ["general", "lights", "settings"]
+            ["general", "lights", "trips", "settings"]
         );
     }
 

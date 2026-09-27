@@ -1,0 +1,563 @@
+//! The grammar of `/trip` and `/spent`, and of the answers typed on a draft
+//! card: amounts, currencies, dates, and lists like `Ann 1000, Bob 1400`.
+
+use chrono::{Datelike, NaiveDate, Weekday};
+use rust_decimal::Decimal;
+
+use super::{
+    card::Field,
+    draft::{DateSpec, Draft, Part, Split},
+    money::{Currency, Rate},
+    service::TripView,
+};
+
+pub const TRIP_USAGE: &str = "/trip — the trip of this chat\n/trip new <name> [currency] — start \
+                              a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this \
+                              chat's trip\n/trip add <name> — add someone without Telegram (the \
+                              trip's creator)";
+
+pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
+                               dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
+                               paid, split equally with everyone: change it on the card before \
+                               saving.";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TripCommand {
+    Show,
+    New {
+        name: String,
+        currency: Option<Currency>,
+    },
+    Join {
+        name: Option<String>,
+    },
+    Add {
+        name: String,
+    },
+    Help,
+}
+
+pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
+    let args = args.trim();
+    let (verb, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    match verb.to_lowercase().as_str() {
+        "" => Ok(TripCommand::Show),
+        "help" => Ok(TripCommand::Help),
+        "new" => {
+            let mut words: Vec<&str> = rest.split_whitespace().collect();
+            let currency = match words.as_slice() {
+                [_, .., last] => currency_word(last),
+                _ => None,
+            };
+            if currency.is_some() {
+                words.pop();
+            }
+            if words.is_empty() {
+                return Err("name the trip, e.g. /trip new Goa".to_string());
+            }
+            Ok(TripCommand::New {
+                name: words.join(" "),
+                currency,
+            })
+        }
+        "join" => Ok(TripCommand::Join {
+            name: (!rest.is_empty()).then(|| rest.to_string()),
+        }),
+        "add" if !rest.is_empty() => Ok(TripCommand::Add {
+            name: rest.to_string(),
+        }),
+        "add" => Err("name who to add, e.g. /trip add Mom".to_string()),
+        other => Err(format!("unknown /trip command `{other}`")),
+    }
+}
+
+/// `/spent`: an expense the sender paid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spent {
+    pub amount: Decimal,
+    pub currency: Option<Currency>,
+    pub description: String,
+    /// From a `#category` word.
+    pub category: Option<String>,
+}
+
+pub fn parse_spent(args: &str) -> Result<Spent, String> {
+    let words: Vec<&str> = args.split_whitespace().collect();
+    let Some(position) = words.iter().position(|word| parse_money(word).is_ok()) else {
+        return Err("how much? e.g. /spent 2400 dinner".to_string());
+    };
+    let (amount, mut currency) = parse_money(words[position]).expect("just parsed");
+    let mut rest: Vec<&str> = words[..position].to_vec();
+    let mut after = words[position + 1..].iter();
+    if currency.is_none()
+        && let Some(next) = words.get(position + 1)
+        && let Some(code) = currency_word(next)
+    {
+        currency = Some(code);
+        after.next();
+    }
+    rest.extend(after);
+
+    let mut category = None;
+    let description: Vec<&str> = rest
+        .into_iter()
+        .filter(|word| match word.strip_prefix('#') {
+            Some(tag) if !tag.is_empty() => {
+                category = Some(tag.to_lowercase());
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    Ok(Spent {
+        amount,
+        currency,
+        description: description.join(" "),
+        category,
+    })
+}
+
+/// A positive amount, with thousands separators or not: `1,234.50`.
+pub fn parse_amount(text: &str) -> Result<Decimal, String> {
+    let digits: String = text
+        .trim()
+        .chars()
+        .filter(|c| *c != ',' && *c != '_')
+        .collect();
+    match Decimal::from_str_exact(&digits) {
+        Ok(amount) if amount > Decimal::ZERO => Ok(amount),
+        Ok(_) => Err(format!("{text} is not more than zero")),
+        Err(_) => Err(format!("`{text}` is not an amount")),
+    }
+}
+
+/// An amount with an optional currency attached: `2400`, `₹2400`, `$30`,
+/// `30usd`, `USD30`.
+pub fn parse_money(word: &str) -> Result<(Decimal, Option<Currency>), String> {
+    let word = word.trim();
+    for (symbol, code) in SYMBOLS {
+        if let Some(amount) = word
+            .strip_prefix(symbol)
+            .or_else(|| word.strip_suffix(symbol))
+        {
+            let currency = Currency::from_code(code).expect("symbols map to known codes");
+            return Ok((parse_amount(amount)?, Some(currency)));
+        }
+    }
+    let split = word
+        .find(|c: char| c.is_ascii_digit())
+        .filter(|start| *start > 0)
+        .map(|start| (&word[..start], &word[start..]))
+        .or_else(|| {
+            word.rfind(|c: char| c.is_ascii_digit())
+                .filter(|end| end + 1 < word.len())
+                .map(|end| (&word[end + 1..], &word[..=end]))
+        });
+    if let Some((code, amount)) = split
+        && code.len() == 3
+        && let Ok(currency) = Currency::from_code(code)
+    {
+        return Ok((parse_amount(amount)?, Some(currency)));
+    }
+    Ok((parse_amount(word)?, None))
+}
+
+/// An amount with an optional currency, attached or as a second word: `2400`,
+/// `30usd`, `30 USD`.
+pub fn parse_money_text(text: &str) -> Result<(Decimal, Option<Currency>), String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.as_slice() {
+        [word] => parse_money(word),
+        [amount, code] => {
+            let currency = Currency::from_code(code).map_err(|error| error.to_string())?;
+            match parse_money(amount)? {
+                (amount, None) => Ok((amount, Some(currency))),
+                (_, Some(_)) => Err(format!("`{text}` has two currencies")),
+            }
+        }
+        _ => Err(format!(
+            "`{text}` is not an amount: send e.g. 2400 or 30 USD"
+        )),
+    }
+}
+
+/// Applies the answer `text` to the `field` of the card's draft.
+pub fn apply_answer(
+    draft: &mut Draft,
+    trip: &TripView,
+    field: Field,
+    text: &str,
+    today: NaiveDate,
+) -> Result<(), String> {
+    let text = text.trim();
+    match field {
+        Field::Amount => {
+            let (amount, currency) = parse_money_text(text)?;
+            let [payer] = draft.payers.as_mut_slice() else {
+                return Err("several people paid: change their amounts with 👛 Paid by".to_string());
+            };
+            payer.amount = amount;
+            draft.stated_total = None;
+            if let Some(currency) = currency {
+                set_currency(draft, currency);
+            }
+        }
+        Field::Description => {
+            if text.is_empty() || text.chars().count() > MAX_DESCRIPTION {
+                return Err(format!("send up to {MAX_DESCRIPTION} characters"));
+            }
+            draft.description = text.to_string();
+        }
+        Field::Payers => {
+            draft.payers = parse_parts(text, trip)?;
+            draft.stated_total = None;
+        }
+        Field::Shares => {
+            draft.split = Split::Shares {
+                weights: parse_parts(text, trip)?,
+            };
+        }
+        Field::Exact => {
+            draft.split = Split::Exact {
+                amounts: parse_parts(text, trip)?,
+            };
+        }
+        Field::Date => draft.date = parse_date(text, today)?,
+        Field::Currency => {
+            let currency = Currency::from_code(text).map_err(|error| error.to_string())?;
+            set_currency(draft, currency);
+        }
+        Field::Rate => {
+            let rate = Rate::new(parse_amount(text)?).map_err(|error| error.to_string())?;
+            draft.rate = Some(rate);
+        }
+    }
+    Ok(())
+}
+
+/// A description's length limit, to keep cards and summaries short.
+const MAX_DESCRIPTION: usize = 100;
+
+/// Changes the draft's currency; a rate given for the previous one no longer
+/// applies.
+pub fn set_currency(draft: &mut Draft, currency: Currency) {
+    if draft.currency != currency {
+        draft.currency = currency;
+        draft.rate = None;
+    }
+}
+
+/// A currency code on its own. Lowercase codes that are also English words
+/// (`all`, `bob`, `top`...) only count in uppercase.
+pub fn currency_word(word: &str) -> Option<Currency> {
+    let currency = Currency::from_code(word).ok()?;
+    let uppercase = word.chars().all(|c| c.is_ascii_uppercase());
+    (uppercase || !WORDS.contains(&word.to_lowercase().as_str())).then_some(currency)
+}
+
+/// Currency symbols, each for its most likely currency.
+const SYMBOLS: &[(&str, &str)] = &[
+    ("₹", "INR"),
+    ("$", "USD"),
+    ("€", "EUR"),
+    ("£", "GBP"),
+    ("¥", "JPY"),
+    ("฿", "THB"),
+    ("₩", "KRW"),
+    ("₫", "VND"),
+    ("₱", "PHP"),
+    ("₺", "TRY"),
+];
+
+/// Currency codes that are also common words.
+const WORDS: &[&str] = &[
+    "all", "amd", "bam", "bob", "cup", "gel", "mad", "mop", "pen", "sos", "top", "try",
+];
+
+/// A list of members with amounts (or weights): `Ann 1000, Bob 1400`, one per
+/// line or separated by commas; `Ann: 1000` and `Ann=1000` work too.
+pub fn parse_parts(text: &str, trip: &TripView) -> Result<Vec<Part>, String> {
+    let items: Vec<&str> = split_items(text)
+        .into_iter()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect();
+    if items.is_empty() {
+        return Err("send names and amounts, e.g. Ann 1000, Bob 1400".to_string());
+    }
+    items
+        .into_iter()
+        .map(|item| {
+            let (name, amount) = item
+                .rsplit_once([' ', ':', '='])
+                .ok_or_else(|| format!("`{item}`: send a name and an amount"))?;
+            let name = name.trim().trim_end_matches([':', '=']).trim();
+            let member = trip
+                .find_by_name(name)
+                .ok_or_else(|| format!("who is {name}? The trip has {}", names(trip)))?;
+            Ok(Part {
+                member: member.id,
+                amount: parse_amount(amount)?,
+            })
+        })
+        .collect()
+}
+
+/// Splits on newlines, semicolons, and commas not followed by a digit (which
+/// separate thousands: `1,000`).
+fn split_items(text: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    for (index, c) in text.char_indices() {
+        let separates = match c {
+            '\n' | ';' => true,
+            ',' => !text[index + 1..].starts_with(|next: char| next.is_ascii_digit()),
+            _ => false,
+        };
+        if separates {
+            items.push(&text[start..index]);
+            start = index + 1;
+        }
+    }
+    items.push(&text[start..]);
+    items
+}
+
+fn names(trip: &TripView) -> String {
+    trip.members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A date: `today`, `yesterday`, a weekday, `2026-09-20`, or `20 Sep` (the
+/// last one, this year or the previous).
+pub fn parse_date(text: &str, today: NaiveDate) -> Result<DateSpec, String> {
+    let text = text.trim().to_lowercase();
+    match text.as_str() {
+        "today" => return Ok(DateSpec::Today),
+        "yesterday" => return Ok(DateSpec::Yesterday),
+        _ => {}
+    }
+    if let Ok(weekday) = text.parse::<Weekday>() {
+        return Ok(DateSpec::Weekday(weekday));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
+        return Ok(DateSpec::On(date));
+    }
+    for format in ["%d %b %Y", "%d %B %Y"] {
+        if let Ok(date) = NaiveDate::parse_from_str(&text, format) {
+            return Ok(DateSpec::On(date));
+        }
+    }
+    for format in ["%d %b %Y", "%d %B %Y"] {
+        let this_year = format!("{text} {}", today.year());
+        if let Ok(date) = NaiveDate::parse_from_str(&this_year, format) {
+            let date = if date > today {
+                date.with_year(today.year() - 1).unwrap_or(date)
+            } else {
+                date
+            };
+            return Ok(DateSpec::On(date));
+        }
+    }
+    Err(format!(
+        "`{text}` is not a date: send e.g. yesterday, friday, 20 Sep or 2026-09-20"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::dec;
+    use teloxide::types::ChatId;
+
+    use super::*;
+    use crate::{
+        db::entities::trips::TripStatus,
+        modules::trips::model::{Member, Trip},
+    };
+
+    fn currency(code: &str) -> Currency {
+        Currency::from_code(code).unwrap()
+    }
+
+    #[test]
+    fn trip_commands() {
+        assert_eq!(parse_trip(""), Ok(TripCommand::Show));
+        assert_eq!(
+            parse_trip("new Goa 2026 INR"),
+            Ok(TripCommand::New {
+                name: "Goa 2026".into(),
+                currency: Some(currency("INR")),
+            })
+        );
+        // A one-word name is never taken for a currency.
+        assert_eq!(
+            parse_trip("new Try"),
+            Ok(TripCommand::New {
+                name: "Try".into(),
+                currency: None,
+            })
+        );
+        assert_eq!(
+            parse_trip("new Tour de France eur"),
+            Ok(TripCommand::New {
+                name: "Tour de France".into(),
+                currency: Some(currency("EUR")),
+            })
+        );
+        assert_eq!(
+            parse_trip("JOIN Annie"),
+            Ok(TripCommand::Join {
+                name: Some("Annie".into())
+            })
+        );
+        assert_eq!(parse_trip("join"), Ok(TripCommand::Join { name: None }));
+        assert!(parse_trip("add").is_err());
+        assert!(parse_trip("new").is_err());
+        assert!(parse_trip("fly").is_err());
+    }
+
+    #[test]
+    fn spent_takes_an_amount_a_currency_and_a_description() {
+        assert_eq!(
+            parse_spent("2400 dinner at the beach"),
+            Ok(Spent {
+                amount: dec!(2400),
+                currency: None,
+                description: "dinner at the beach".into(),
+                category: None,
+            })
+        );
+        assert_eq!(
+            parse_spent("30 usd taxi #Transport"),
+            Ok(Spent {
+                amount: dec!(30),
+                currency: Some(currency("USD")),
+                description: "taxi".into(),
+                category: Some("transport".into()),
+            })
+        );
+        let snacks = parse_spent("snacks ₹1,450.50").unwrap();
+        assert_eq!(
+            (snacks.amount, snacks.currency, snacks.description.as_str()),
+            (dec!(1450.50), Some(currency("INR")), "snacks")
+        );
+        // "all" is a currency (ALL) only in uppercase.
+        assert_eq!(
+            parse_spent("300 all day pass").unwrap().description,
+            "all day pass"
+        );
+        assert_eq!(
+            parse_spent("300 ALL day pass").unwrap().currency,
+            Some(currency("ALL"))
+        );
+        assert!(parse_spent("dinner").is_err());
+        assert!(parse_spent("0 dinner").is_err());
+    }
+
+    #[test]
+    fn money_words() {
+        assert_eq!(parse_money("30usd"), Ok((dec!(30), Some(currency("USD")))));
+        assert_eq!(
+            parse_money("EUR12.5"),
+            Ok((dec!(12.5), Some(currency("EUR"))))
+        );
+        assert_eq!(parse_money("12€"), Ok((dec!(12), Some(currency("EUR")))));
+        assert_eq!(parse_money("1_000"), Ok((dec!(1000), None)));
+        assert!(parse_money("12abc").is_err());
+        assert!(parse_money("-5").is_err());
+    }
+
+    fn goa() -> TripView {
+        TripView {
+            trip: Trip {
+                id: 1,
+                home_chat: ChatId(-100),
+                name: "Goa".into(),
+                base: currency("INR"),
+                status: TripStatus::Active,
+                created_by: teloxide::types::UserId(1),
+            },
+            members: ["Ann", "Bob", "Mom"]
+                .iter()
+                .zip(1..)
+                .map(|(name, id)| Member {
+                    id,
+                    name: (*name).to_string(),
+                    user: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn parts_name_members_and_amounts() {
+        let parts = parse_parts("Ann 1,000, bob: 1400\nmom=2.5", &goa()).unwrap();
+        let parts: Vec<_> = parts
+            .iter()
+            .map(|part| (part.member, part.amount))
+            .collect();
+        assert_eq!(parts, [(1, dec!(1000)), (2, dec!(1400)), (3, dec!(2.5))]);
+        let parts = parse_parts("Ann 1,000,Bob 5", &goa()).unwrap();
+        assert_eq!(parts[1].amount, dec!(5));
+    }
+
+    #[test]
+    fn parts_report_strangers_and_missing_amounts() {
+        let error = parse_parts("Zed 10", &goa()).unwrap_err();
+        assert!(error.contains("who is Zed?"), "{error}");
+        assert!(parse_parts("Ann", &goa()).is_err());
+        assert!(parse_parts(" , ", &goa()).is_err());
+    }
+
+    #[test]
+    fn answers_change_the_draft() {
+        let trip = goa();
+        let today = NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
+        let mut draft = Draft::expense("dinner", currency("INR"), dec!(100), 1, vec![1, 2, 3]);
+        let mut answer = |field, text: &str| apply_answer(&mut draft, &trip, field, text, today);
+
+        answer(Field::Rate, "80").unwrap();
+        answer(Field::Amount, "30 usd").unwrap();
+        answer(Field::Description, "  taxi ").unwrap();
+        answer(Field::Date, "yesterday").unwrap();
+        answer(Field::Exact, "Ann 20, Bob 10").unwrap();
+        assert!(answer(Field::Currency, "XYZ").is_err());
+        assert!(answer(Field::Description, "").is_err());
+        assert_eq!(draft.payers[0].amount, dec!(30));
+        assert_eq!(draft.currency, currency("USD"));
+        // The rate was for the previous currency.
+        assert_eq!(draft.rate, None);
+        assert_eq!(draft.description, "taxi");
+        assert_eq!(draft.date, DateSpec::Yesterday);
+        assert_eq!(draft.split.members(), [1, 2]);
+
+        let mut answer = |field, text: &str| apply_answer(&mut draft, &trip, field, text, today);
+        answer(Field::Payers, "Ann 10, Bob 20").unwrap();
+        assert!(
+            answer(Field::Amount, "50")
+                .unwrap_err()
+                .contains("several people paid")
+        );
+    }
+
+    #[test]
+    fn dates() {
+        // A Saturday.
+        let today = NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
+        let on = |y, m, d| Ok(DateSpec::On(NaiveDate::from_ymd_opt(y, m, d).unwrap()));
+        assert_eq!(parse_date("Yesterday", today), Ok(DateSpec::Yesterday));
+        assert_eq!(
+            parse_date("friday", today),
+            Ok(DateSpec::Weekday(Weekday::Fri))
+        );
+        assert_eq!(parse_date("2026-09-20", today), on(2026, 9, 20));
+        assert_eq!(parse_date("20 sep", today), on(2026, 9, 20));
+        assert_eq!(parse_date("3 December", today), on(2025, 12, 3));
+        assert_eq!(parse_date("3 Dec 2024", today), on(2024, 12, 3));
+        assert!(parse_date("someday", today).is_err());
+    }
+}
