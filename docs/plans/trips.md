@@ -87,8 +87,8 @@ settle-up, with optional AI parsing of messages and receipts.
   1. The extraction schema has no computed fields: amounts as written,
      currency, payers, description, category, date as written, and a split
      spec (`{equal: [..]}`, `{shares: {..}}`, `{exact: {..}}`).
-  2. Every amount returned must appear literally in the user's text, or the
-     draft is flagged "⚠️ couldn't verify".
+  2. Every amount returned must appear literally in the user's text (as a
+     number of its own: `400` is not in `2,400`), or the message is refused.
   3. Receipts: the AI extracts line items and the printed total; Rust sums the
      items and shows any mismatch. Tax and tip are items.
   4. Questions: the AI picks a query from a fixed menu (`spend(by=category |
@@ -112,7 +112,7 @@ settle-up, with optional AI parsing of messages and receipts.
   through; the reply is `structured_output`. No tools means a prompt injection
   can at worst produce a bad draft. At most 2 concurrent calls, a 60 s
   timeout, a "🤔 reading…" placeholder. Tests use `FakeLlm`.
-- **Who**: `ai.users` defaults to the owner and sudo users (personal use of
+- **Who**: the owner and the sudo users, plus `ai.users` (personal use of
   the subscription). In groups, only messages mentioning or replying to the
   bot are parsed.
 - Receipt images need `--input-format stream-json` with an image block: to be
@@ -121,9 +121,11 @@ settle-up, with optional AI parsing of messages and receipts.
 ## Settings
 
 - Runtime (`[modules.trips]`): `default_currency`, `notify_home_chat`,
-  `custom_categories`, `ai.enabled`, `ai.users`, `ai.model`, `rates.auto`.
-- File/env only: `ai.claude_path` (default: from `PATH`), `ai.oauth_token`
-  (`Secret`).
+  `categories`, `auto_rates`, `ai_messages`.
+- The AI is shared by all modules, so it is configured in the core `[ai]`
+  section: `model` and `users` are runtime settings; `oauth_token` (a
+  `Secret`), `claude_path`, `timeout_secs` and `max_concurrent` are file/env
+  only.
 
 ## Storage
 

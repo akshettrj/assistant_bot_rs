@@ -317,8 +317,33 @@ what your forex card charges), else the day's European Central Bank rate from
 
 Ending a trip (`/trip end`, or from the panel) posts its summary (spent by
 category, each person's paid and share, the settle-up) and only lets
-settlements in; its creator can reopen it. The design, including the AI
-parsing planned next, is in [docs/plans/trips.md](docs/plans/trips.md).
+settlements in; its creator can reopen it. The design is in
+[docs/plans/trips.md](docs/plans/trips.md).
+
+#### Expenses in plain words
+
+With the AI set up (see [AI](#ai)), you can also just write: "dinner 2400,
+split with Ann", "Bob paid 1,000 and I paid 1,400 for the hotel yesterday",
+"$30 taxi". In a private chat any message works; in a group, mention the bot
+or reply to it. The AI only copies what the message says into a draft card
+marked 🤖, which you check and save as usual. It never does the maths: any
+amount it gives that isn't written in your message is refused, and every
+total, share and conversion is computed by the bot. Turn it off with
+`modules.trips.ai_messages`.
+
+## AI
+
+Modules can read what people write with a language model: the Claude Code
+CLI, with your Claude subscription (no API key). Install Claude Code, run
+`claude setup-token`, and pass the token as `ASSISTANT_AI__OAUTH_TOKEN` (or
+`ai.oauth_token`). Each request runs `claude -p` without tools (so a message
+can't make it read files or run commands), in an empty temporary directory,
+with only the token and `PATH` in its environment.
+
+Only the owner and the sudo users may use it, plus the users in `ai.users`:
+it uses your subscription, which Anthropic's terms intend for your own use.
+`ai.model` picks the model (`sonnet`, or `haiku` to save usage). Try it with
+`ASSISTANT_AI__OAUTH_TOKEN=... cargo test -- --ignored real_claude`.
 
 ## Architecture
 
@@ -335,6 +360,8 @@ src/
 │                             (from botconf-telegram)
 ├── directory.rs              names for user and chat ids, for the panel
 ├── access.rs                 who may use which module
+├── ai/                       language models for features: the Claude Code CLI
+│                             with the owner's subscription
 ├── bot/                      Telegram client, handler tree, error reporting,
 │                             command menus
 ├── modules/                  Module trait, registry, built-in modules
