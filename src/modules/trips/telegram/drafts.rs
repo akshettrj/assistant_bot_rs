@@ -8,7 +8,9 @@ use teloxide::{
     utils::{html::escape, render::RenderMessageTextHelper},
 };
 
-use super::{Toast, current_settings, edit, for_user, reply, reply_error, reply_with, today};
+use super::{
+    Toast, current_settings, edit, for_user, rates, reply, reply_error, reply_with, today,
+};
 use crate::{
     bot::AssistantBot,
     context::AppContext,
@@ -16,7 +18,7 @@ use crate::{
     modules::{
         HandlerResult,
         trips::{
-            ID,
+            ID, TripsState,
             card::{self, Action, Field, View},
             command::{self, SPENT_USAGE},
             draft::{Draft, Part, Split},
@@ -32,6 +34,7 @@ use crate::{
 pub async fn spent(
     bot: &AssistantBot,
     ctx: &AppContext,
+    state: &TripsState,
     msg: &Message,
     user: &User,
     args: &str,
@@ -75,7 +78,7 @@ pub async fn spent(
     .await;
 
     match result {
-        Ok((trip, stored)) => send_card(bot, ctx, &trip, &stored, msg).await,
+        Ok((trip, stored)) => send_card(bot, ctx, state, &trip, &stored, msg).await,
         Err(error) => reply_error(bot, msg, error).await,
     }
 }
@@ -84,11 +87,12 @@ pub async fn spent(
 pub async fn send_card(
     bot: &AssistantBot,
     ctx: &AppContext,
+    state: &TripsState,
     trip: &TripView,
     stored: &StoredDraft,
     msg: &Message,
 ) -> HandlerResult {
-    let (text, keyboard) = render(ctx, trip, stored, View::Main).await?;
+    let (text, keyboard) = render(ctx, state, trip, stored, View::Main).await?;
     let sent = reply_with(bot, msg, text, Some(keyboard)).await?;
     service::set_card(&ctx.db, stored.id, sent.id).await?;
     Ok(())
@@ -97,13 +101,15 @@ pub async fn send_card(
 /// The card of `stored` showing `view`.
 async fn render(
     ctx: &AppContext,
+    state: &TripsState,
     trip: &TripView,
     stored: &StoredDraft,
     view: View,
 ) -> Result<(String, InlineKeyboardMarkup), TripsError> {
     let settings = current_settings(ctx);
     let today = today(ctx);
-    let outcome = service::check_draft(&ctx.db, trip, &stored.draft, today).await?;
+    let outcome =
+        service::check_draft(&ctx.db, rates(ctx, state), trip, &stored.draft, today).await?;
     let currencies = service::rate_currencies(&ctx.db, &trip.trip).await?;
     let categories = model::categories(&settings);
     let choices = card::Choices {
@@ -121,6 +127,7 @@ async fn render(
 pub async fn press(
     bot: &AssistantBot,
     ctx: &AppContext,
+    state: &TripsState,
     query: &CallbackQuery,
     message: &Message,
     draft_id: i32,
@@ -147,7 +154,7 @@ pub async fn press(
     let draft = &mut stored.draft;
     let view = match action {
         Action::Show(view) => view,
-        Action::Save => return save(bot, ctx, &trip, &stored, message, query.from.id).await,
+        Action::Save => return save(bot, ctx, state, &trip, &stored, message, query.from.id).await,
         Action::Discard => {
             service::discard_draft(&ctx.db, stored.id).await?;
             // Best effort: old messages cannot be deleted.
@@ -202,7 +209,7 @@ pub async fn press(
     };
 
     service::update_draft(&ctx.db, &stored).await?;
-    let (text, keyboard) = render(ctx, &trip, &stored, view).await?;
+    let (text, keyboard) = render(ctx, state, &trip, &stored, view).await?;
     edit(bot, chat, message.id, text, Some(keyboard)).await?;
     Ok(Toast::none())
 }
@@ -210,6 +217,7 @@ pub async fn press(
 async fn save(
     bot: &AssistantBot,
     ctx: &AppContext,
+    state: &TripsState,
     trip: &TripView,
     stored: &StoredDraft,
     message: &Message,
@@ -217,17 +225,18 @@ async fn save(
 ) -> anyhow::Result<Toast> {
     let settings = current_settings(ctx);
     let today = today(ctx);
-    let checked = match service::confirm_draft(&ctx.db, stored, user, today).await {
-        Ok((_, checked)) => checked,
-        Err(TripsError::Problems(problems)) => {
-            let problems: Vec<String> = problems
-                .iter()
-                .map(|problem| format!("⚠️ {}", problem.describe(|member| trip.name(member))))
-                .collect();
-            return Ok(Toast::alert(problems.join("\n")));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let checked =
+        match service::confirm_draft(&ctx.db, rates(ctx, state), stored, user, today).await {
+            Ok((_, checked)) => checked,
+            Err(TripsError::Problems(problems)) => {
+                let problems: Vec<String> = problems
+                    .iter()
+                    .map(|problem| format!("⚠️ {}", problem.describe(|member| trip.name(member))))
+                    .collect();
+                return Ok(Toast::alert(problems.join("\n")));
+            }
+            Err(error) => return Err(error.into()),
+        };
 
     let saved = card::saved_text(trip, &stored.draft, &checked, &settings, today);
     edit(bot, message.chat.id, message.id, saved, None).await?;
@@ -296,6 +305,7 @@ pub async fn handle_input(
     msg: Message,
     answer: Answer<DraftInput>,
     ctx: Arc<AppContext>,
+    state: Arc<TripsState>,
 ) -> HandlerResult {
     let chat = msg.chat.id;
     let Some(user) = msg.from.as_ref().map(|user| user.id) else {
@@ -325,7 +335,7 @@ pub async fn handle_input(
         Ok(Ok((trip, stored))) => {
             ctx.prompts.finish(chat, user);
             prompts::clean_up(&bot, &msg, &prompt, "").await?;
-            let (text, keyboard) = render(&ctx, &trip, &stored, View::Main).await?;
+            let (text, keyboard) = render(&ctx, &state, &trip, &stored, View::Main).await?;
             edit(&bot, chat, data.card, text, Some(keyboard)).await
         }
         Ok(Err(problem)) => {

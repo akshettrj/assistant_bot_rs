@@ -8,9 +8,10 @@ use teloxide::types::{ChatId, MessageId, UserId};
 
 use super::{
     draft::{self, Checked, Context, DateSpec, Draft, MemberId, Part, Problem, Split},
-    ledger::{Balances, LedgerError},
+    ledger::{Balances, LedgerError, Transfer},
     model::{Member, Trip},
     money::{Currency, Money, Rate},
+    rates::Rates,
 };
 use crate::db::{
     entities::{
@@ -324,20 +325,27 @@ pub async fn purge_drafts(db: &DatabaseConnection, now: DateTime<Utc>) -> Result
 /// The rate for `currency` when an entry gives none: the trip's fixed one.
 pub async fn known_rate(
     db: &DatabaseConnection,
+    rates: Option<&Rates>,
     trip: &Trip,
     currency: Currency,
+    on: NaiveDate,
 ) -> Result<Option<(Rate, RateSource)>> {
     let fixed = trips::rates(db, trip.id)
         .await?
         .into_iter()
         .find(|rate| rate.currency == currency.code());
-    fixed
-        .map(|rate| {
-            Rate::new(rate.rate.0)
-                .map(|rate| (rate, RateSource::Trip))
-                .map_err(|error| TripsError::Corrupt(error.to_string()))
-        })
-        .transpose()
+    if let Some(fixed) = fixed {
+        let rate =
+            Rate::new(fixed.rate.0).map_err(|error| TripsError::Corrupt(error.to_string()))?;
+        return Ok(Some((rate, RateSource::Trip)));
+    }
+    let Some(rates) = rates else {
+        return Ok(None);
+    };
+    Ok(rates
+        .get(currency, trip.base, on)
+        .await
+        .map(|rate| (rate, RateSource::Auto)))
 }
 
 /// The currencies the trip has a fixed rate for.
@@ -352,6 +360,7 @@ pub async fn rate_currencies(db: &DatabaseConnection, trip: &Trip) -> Result<Vec
 /// Checks the draft against the trip: its amounts, or its problems.
 pub async fn check_draft(
     db: &DatabaseConnection,
+    rates: Option<&Rates>,
     trip: &TripView,
     draft: &Draft,
     today: NaiveDate,
@@ -359,7 +368,9 @@ pub async fn check_draft(
     let known_rate = if draft.currency == trip.trip.base {
         None
     } else {
-        known_rate(db, &trip.trip, draft.currency).await?
+        // The day's rate; there are none for future days yet.
+        let on = draft.date.resolve(today).min(today);
+        known_rate(db, rates, &trip.trip, draft.currency, on).await?
     };
     let members = trip.member_ids();
     let context = Context {
@@ -375,6 +386,7 @@ pub async fn check_draft(
 /// author, may; returns the entry's id and amounts.
 pub async fn confirm_draft(
     db: &DatabaseConnection,
+    rates: Option<&Rates>,
     stored: &StoredDraft,
     user: UserId,
     today: NaiveDate,
@@ -386,7 +398,7 @@ pub async fn confirm_draft(
             .map_or("its author".to_string(), |member| member.name.clone());
         return Err(TripsError::NotAllowed(author));
     }
-    let checked = check_for(db, &trip, &stored.draft, user, today).await?;
+    let checked = check_for(db, rates, &trip, &stored.draft, user, today).await?;
     let txn = db.begin().await?;
     let id = write_entry(&txn, &trip.trip, &stored.draft, &checked, user).await?;
     drafts::delete(&txn, stored.id).await?;
@@ -397,6 +409,7 @@ pub async fn confirm_draft(
 /// Checks that `user` may record `draft` on the trip, and its amounts.
 async fn check_for(
     db: &DatabaseConnection,
+    rates: Option<&Rates>,
     trip: &TripView,
     draft: &Draft,
     user: UserId,
@@ -410,7 +423,7 @@ async fn check_for(
         let record = find_entry(db, &trip.trip, entry).await?;
         require_author_or_creator(trip, &record, user)?;
     }
-    check_draft(db, trip, draft, today)
+    check_draft(db, rates, trip, draft, today)
         .await?
         .map_err(TripsError::Problems)
 }
@@ -435,18 +448,23 @@ where
     }
 }
 
-/// Records that `from` paid `amount` (in the trip's currency) back to `to`.
+/// Records a payment back, in the trip's currency.
 pub async fn settle(
     db: &DatabaseConnection,
+    rates: Option<&Rates>,
     trip: &TripView,
     by: UserId,
-    from: MemberId,
-    to: MemberId,
-    amount: Money,
+    transfer: &Transfer<MemberId>,
     today: NaiveDate,
 ) -> Result<i32> {
-    let draft = Draft::settlement(amount.currency(), amount.amount(), from, to);
-    let checked = check_for(db, trip, &draft, by, today).await?;
+    let amount = transfer.amount;
+    let draft = Draft::settlement(
+        amount.currency(),
+        amount.amount(),
+        transfer.from,
+        transfer.to,
+    );
+    let checked = check_for(db, rates, trip, &draft, by, today).await?;
     write_entry(db, &trip.trip, &draft, &checked, by).await
 }
 
@@ -852,10 +870,12 @@ mod tests {
 
         // Only the author confirms.
         assert!(matches!(
-            confirm_draft(&db, &stored, BOB, today()).await,
+            confirm_draft(&db, None, &stored, BOB, today()).await,
             Err(TripsError::NotAllowed(_))
         ));
-        let (entry, checked) = confirm_draft(&db, &stored, ANN, today()).await.unwrap();
+        let (entry, checked) = confirm_draft(&db, None, &stored, ANN, today())
+            .await
+            .unwrap();
         assert_eq!(checked.base_total.amount(), dec!(300));
         assert!(matches!(
             find_draft(&db, stored.id).await,
@@ -889,18 +909,18 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            check_draft(&db, &trip, &stored.draft, today()).await.unwrap(),
+            check_draft(&db, None, &trip, &stored.draft, today()).await.unwrap(),
             Err(problems) if matches!(problems[..], [Problem::NeedRate { .. }])
         ));
         assert!(matches!(
-            confirm_draft(&db, &stored, ANN, today()).await,
+            confirm_draft(&db, None, &stored, ANN, today()).await,
             Err(TripsError::Problems(_))
         ));
 
         trips::set_rate(&db, trip.trip.id, "USD", dec!(83.5))
             .await
             .unwrap();
-        let checked = check_draft(&db, &trip, &stored.draft, today())
+        let checked = check_draft(&db, None, &trip, &stored.draft, today())
             .await
             .unwrap()
             .unwrap();
@@ -937,7 +957,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            confirm_draft(&db, &stored, ANN, today()).await,
+            confirm_draft(&db, None, &stored, ANN, today()).await,
             Err(TripsError::Ended(_))
         ));
 
@@ -945,7 +965,9 @@ mod tests {
         let stored = save_draft(&db, &trip, ChatId(-100), BOB, &settlement)
             .await
             .unwrap();
-        confirm_draft(&db, &stored, BOB, today()).await.unwrap();
+        confirm_draft(&db, None, &stored, BOB, today())
+            .await
+            .unwrap();
     }
 
     /// Logs `draft` by `author` on the trip, returning the entry's id.
@@ -953,7 +975,10 @@ mod tests {
         let stored = save_draft(db, trip, ChatId(-100), author, draft)
             .await
             .unwrap();
-        confirm_draft(db, &stored, author, today()).await.unwrap().0
+        confirm_draft(db, None, &stored, author, today())
+            .await
+            .unwrap()
+            .0
     }
 
     #[tokio::test]
@@ -995,7 +1020,9 @@ mod tests {
         assert_eq!(stored.draft.split, draft.split);
         assert_eq!(stored.draft.rate_source, Some(RateSource::Trip));
         stored.draft.description = "airport taxi".into();
-        let (edited, checked) = confirm_draft(&db, &stored, ANN, today()).await.unwrap();
+        let (edited, checked) = confirm_draft(&db, None, &stored, ANN, today())
+            .await
+            .unwrap();
         assert_eq!(edited, entry);
         assert_eq!(checked.base_total.amount(), dec!(800));
         assert_eq!(checked.rate_source, RateSource::Trip);
@@ -1052,17 +1079,9 @@ mod tests {
             .settle_up();
         assert_eq!(owed.len(), 2);
         for transfer in owed {
-            settle(
-                &db,
-                &trip,
-                BOB,
-                transfer.from,
-                transfer.to,
-                transfer.amount,
-                today(),
-            )
-            .await
-            .unwrap();
+            settle(&db, None, &trip, BOB, &transfer, today())
+                .await
+                .unwrap();
         }
         let records = entries(&db, &trip.trip).await.unwrap();
         assert!(balances(&trip.trip, &records).unwrap().is_settled());
@@ -1105,6 +1124,51 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn the_trips_rate_comes_before_the_days() {
+        use std::sync::Arc;
+
+        use crate::modules::trips::rates::{RateSource as Source, testing::FixedRates};
+
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let ids = trip.member_ids();
+        let usd = Currency::from_code("USD").unwrap();
+        let source = FixedRates {
+            rates: [(("USD", "INR"), dec!(83.5))].into(),
+            ..FixedRates::default()
+        };
+        let rates = Rates::new(Arc::new(source) as Arc<dyn Source>);
+        let mut draft = Draft::expense("taxi", usd, dec!(10), ids[0], ids.clone());
+        // Tomorrow has no rate yet: today's is used.
+        draft.date = DateSpec::On(today().succ_opt().unwrap());
+
+        let checked = check_draft(&db, Some(&rates), &trip, &draft, today())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (checked.rate_source, checked.base_total.amount()),
+            (RateSource::Auto, dec!(835))
+        );
+        // Without automatic rates, one must be given.
+        assert!(
+            check_draft(&db, None, &trip, &draft, today())
+                .await
+                .unwrap()
+                .is_err()
+        );
+
+        trips::set_rate(&db, trip.trip.id, "USD", dec!(80))
+            .await
+            .unwrap();
+        let checked = check_draft(&db, Some(&rates), &trip, &draft, today())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checked.rate_source, RateSource::Trip);
     }
 
     #[tokio::test]

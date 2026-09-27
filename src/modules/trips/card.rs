@@ -273,7 +273,7 @@ fn details(
             if checked.rate_source != RateSource::Base {
                 let source = match checked.rate_source {
                     RateSource::Base | RateSource::Manual => "your rate",
-                    RateSource::Auto => "today's rate",
+                    RateSource::Auto => "the day's ECB rate",
                     RateSource::Trip => "the trip's rate",
                 };
                 lines.push(escape(&format!(

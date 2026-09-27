@@ -351,6 +351,7 @@ dependencies = [
  "iana-time-zone",
  "migration",
  "proptest",
+ "reqwest",
  "rust_decimal",
  "rustuya",
  "sea-orm",

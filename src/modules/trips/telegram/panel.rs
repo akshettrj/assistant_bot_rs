@@ -9,7 +9,7 @@ use teloxide::{
     utils::html::{bold, escape},
 };
 
-use super::{Toast, current_settings, drafts, edit, reply, reply_error, reply_with, today};
+use super::{Toast, current_settings, drafts, edit, rates, reply, reply_error, reply_with, today};
 use crate::{
     bot::AssistantBot,
     context::AppContext,
@@ -17,7 +17,7 @@ use crate::{
     modules::{
         HandlerResult,
         trips::{
-            ID,
+            ID, TripsState,
             command::{self, SETTLE_USAGE, TRIP_USAGE, TripCommand},
             draft::Draft,
             panel::{self as pages, Action, Field, Page, Rendered},
@@ -167,6 +167,7 @@ pub async fn balance(bot: &AssistantBot, ctx: &AppContext, msg: &Message) -> Han
 pub async fn settle(
     bot: &AssistantBot,
     ctx: &AppContext,
+    state: &TripsState,
     msg: &Message,
     user: &User,
     args: &str,
@@ -198,7 +199,7 @@ pub async fn settle(
     }
     .await;
     match result {
-        Ok((trip, stored)) => drafts::send_card(bot, ctx, &trip, &stored, msg).await,
+        Ok((trip, stored)) => drafts::send_card(bot, ctx, state, &trip, &stored, msg).await,
         Err(error) => reply_error(bot, msg, error).await,
     }
 }
@@ -318,6 +319,7 @@ async fn show(
 pub async fn press(
     bot: &AssistantBot,
     ctx: &AppContext,
+    state: &TripsState,
     query: &CallbackQuery,
     message: &Message,
     trip_id: i32,
@@ -348,7 +350,8 @@ pub async fn press(
                 });
             match suggested {
                 Some(transfer) => {
-                    service::settle(db, &trip, user, from, to, transfer.amount, today(ctx)).await?;
+                    service::settle(db, rates(ctx, state), &trip, user, &transfer, today(ctx))
+                        .await?;
                     let done = format!("✅ Recorded: {}", pages::describe(&trip, &transfer));
                     (Page::Balances, Toast::new(done))
                 }
@@ -360,7 +363,7 @@ pub async fn press(
         }
         Action::Edit(id) => {
             let stored = service::edit_entry(db, &trip, id, chat.id, user).await?;
-            drafts::send_card(bot, ctx, &trip, &stored, message).await?;
+            drafts::send_card(bot, ctx, state, &trip, &stored, message).await?;
             return Ok(Toast::new("✏️ Change it on the card, then save"));
         }
         Action::Delete(id) => {

@@ -100,7 +100,7 @@ pub fn builtin() -> Vec<Arc<dyn Module>> {
     vec![
         Arc::new(general::GeneralModule),
         Arc::new(lights::LightsModule::new()),
-        Arc::new(trips::TripsModule),
+        Arc::new(trips::TripsModule::new()),
         Arc::new(settings::SettingsModule),
     ]
 }

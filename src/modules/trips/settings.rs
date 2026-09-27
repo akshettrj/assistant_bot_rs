@@ -21,6 +21,10 @@ pub struct TripsSettings {
     pub notify_home_chat: bool,
     /// Extra expense categories: id → label with an emoji.
     pub categories: BTreeMap<String, String>,
+    /// Whether foreign expenses use the day's ECB rate when the trip has no
+    /// fixed one.
+    #[serde(deserialize_with = "yes_or_no")]
+    pub auto_rates: bool,
 }
 
 impl Default for TripsSettings {
@@ -29,6 +33,7 @@ impl Default for TripsSettings {
             default_currency: None,
             notify_home_chat: true,
             categories: BTreeMap::new(),
+            auto_rates: true,
         }
     }
 }
@@ -50,6 +55,16 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         "Whether expenses logged in private are announced in the trip's chat",
     )
     .titled("Announce private expenses")
+    .kind(Kind::OneOf {
+        choices: Choices::Fixed(YES_OR_NO),
+        custom: false,
+        optional: false,
+    }),
+    RuntimeSetting::new(
+        "auto_rates",
+        "Whether foreign expenses use the day's ECB rate when the trip has no fixed rate",
+    )
+    .titled("Automatic exchange rates")
     .kind(Kind::OneOf {
         choices: Choices::Fixed(YES_OR_NO),
         custom: false,

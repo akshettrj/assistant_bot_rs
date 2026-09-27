@@ -15,9 +15,10 @@ use teloxide::{
 };
 
 use super::{
-    Command, ID, card,
+    Command, ID, TripsState, card,
     command::{self as grammar, TRIP_USAGE},
     panel as pages,
+    rates::Rates,
     service::TripsError,
     settings::TripsSettings,
 };
@@ -31,6 +32,11 @@ pub fn current_settings(ctx: &AppContext) -> TripsSettings {
         .module_settings::<TripsSettings>(ID)
         .cloned()
         .unwrap_or_default()
+}
+
+/// The automatic exchange rates, unless they are turned off.
+pub fn rates<'a>(ctx: &AppContext, state: &'a TripsState) -> Option<&'a Rates> {
+    current_settings(ctx).auto_rates.then_some(&state.rates)
 }
 
 /// Today, in the bot's timezone.
@@ -128,6 +134,7 @@ pub async fn handle_command(
     msg: Message,
     command: Command,
     ctx: Arc<AppContext>,
+    state: Arc<TripsState>,
 ) -> HandlerResult {
     let Some(user) = msg.from.clone() else {
         return Ok(());
@@ -140,9 +147,9 @@ pub async fn handle_command(
                 reply(&bot, &msg, text).await
             }
         },
-        Command::Spent(args) => drafts::spent(&bot, &ctx, &msg, &user, &args).await,
+        Command::Spent(args) => drafts::spent(&bot, &ctx, &state, &msg, &user, &args).await,
         Command::Balance => panel::balance(&bot, &ctx, &msg).await,
-        Command::Settle(args) => panel::settle(&bot, &ctx, &msg, &user, &args).await,
+        Command::Settle(args) => panel::settle(&bot, &ctx, &state, &msg, &user, &args).await,
         Command::Export => panel::export_command(&bot, &ctx, &msg).await,
     }
 }
@@ -152,14 +159,15 @@ pub async fn handle_button(
     bot: AssistantBot,
     query: CallbackQuery,
     ctx: Arc<AppContext>,
+    state: Arc<TripsState>,
 ) -> HandlerResult {
     let data = query.data.as_deref().unwrap_or_default();
     let pressed = match query.regular_message() {
         Some(message) => {
             if let Some((draft, action)) = card::parse(data) {
-                drafts::press(&bot, &ctx, &query, message, draft, action).await
+                drafts::press(&bot, &ctx, &state, &query, message, draft, action).await
             } else if let Some((trip, action)) = pages::parse(data) {
-                panel::press(&bot, &ctx, &query, message, trip, action).await
+                panel::press(&bot, &ctx, &state, &query, message, trip, action).await
             } else {
                 Ok(Toast::alert("This button no longer works"))
             }

@@ -122,6 +122,10 @@ enabled = false
 # Runtime. Whether expenses logged in a private chat are announced in the
 # trip's chat.
 notify_home_chat = true
+# Runtime. Whether foreign expenses use the day's European Central Bank rate
+# (from frankfurter.dev) when the trip has no fixed rate for the currency.
+# Fixed rates are set from the /trip panel.
+auto_rates = true
 
 # Runtime. Extra expense categories besides food, transport, stay, activities,
 # shopping, health and other: an id (for `/spent 500 visa fee #visa`) and a

@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod model;
 pub mod money;
 pub mod panel;
+pub mod rates;
 pub mod report;
 pub mod service;
 pub mod settings;
@@ -29,7 +30,10 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use teloxide::{prelude::*, utils::command::BotCommands};
 
-use self::settings::{RUNTIME_SETTINGS, TripsSettings};
+use self::{
+    rates::{Frankfurter, RateSource, Rates},
+    settings::{RUNTIME_SETTINGS, TripsSettings},
+};
 use crate::{
     access::AccessPolicy,
     bot::AssistantBot,
@@ -58,7 +62,37 @@ enum Command {
     Export,
 }
 
-pub struct TripsModule;
+/// What the module's handlers share, besides the app's context.
+#[derive(Debug)]
+pub struct TripsState {
+    pub rates: Rates,
+}
+
+pub struct TripsModule {
+    state: Arc<TripsState>,
+}
+
+impl TripsModule {
+    /// With the ECB's rates, from Frankfurter.
+    pub fn new() -> Self {
+        Self::with_rates(Arc::new(Frankfurter::new()))
+    }
+
+    /// With rates from `source` (e.g. fixed ones in tests).
+    pub fn with_rates(source: Arc<dyn RateSource>) -> Self {
+        Self {
+            state: Arc::new(TripsState {
+                rates: Rates::new(source),
+            }),
+        }
+    }
+}
+
+impl Default for TripsModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Module for TripsModule {
     fn info(&self) -> ModuleInfo {
@@ -97,7 +131,9 @@ impl Module for TripsModule {
     }
 
     fn handler(&self) -> UpdateHandler {
+        let state = Arc::clone(&self.state);
         dptree::entry()
+            .map(move || Arc::clone(&state))
             .branch(
                 Update::filter_message()
                     .filter_map(|msg: Message, ctx: Arc<AppContext>| {
