@@ -11,9 +11,10 @@ use teloxide::{
 };
 
 use super::{
-    draft::{Checked, DateSpec, Draft, MemberId, Problem, Split},
+    claims::{self, Amount, Base, Claim, Group, How, Line, Spread},
+    draft::{Checked, DateSpec, Draft, MemberId, Problem},
     model::{self, Category},
-    money::Currency,
+    money::{Currency, Money},
     service::TripView,
     settings::TripsSettings,
     text,
@@ -257,9 +258,7 @@ fn details(
     settings: &TripsSettings,
     today: NaiveDate,
 ) -> Vec<String> {
-    let checked = outcome.as_ref().ok();
     let mut lines = Vec::new();
-
     let date = text::date(draft.date.resolve(today), today);
     if draft.kind == EntryKind::Expense {
         lines.push(escape(&format!(
@@ -269,91 +268,240 @@ fn details(
     } else {
         lines.push(escape(&date));
     }
+    match outcome {
+        Ok(checked) => lines.extend(working(trip, draft, checked)),
+        Err(_) => lines.extend(said(trip, draft)),
+    }
+    for unclear in &draft.unclear {
+        lines.push(format!(
+            "❓ {}",
+            escape(&format!("Not taken into account: {unclear}"))
+        ));
+    }
+    lines
+}
 
-    match checked {
-        Some(checked) => {
-            lines.push(format!("💰 {}", bold(&escape(&text::money(checked.total)))));
-            if checked.rate_source != RateSource::Base {
-                let source = match checked.rate_source {
-                    RateSource::Base | RateSource::Manual => "your rate",
-                    RateSource::Auto => "the day's ECB rate",
-                    RateSource::Trip => "the trip's rate",
-                };
-                lines.push(escape(&format!(
-                    "   × {} ({source}) = {}",
-                    checked.rate,
-                    text::money(checked.base_total)
-                )));
-            }
-        }
-        None => {
-            let total: rust_decimal::Decimal = draft.payers.iter().map(|part| part.amount).sum();
-            lines.push(format!(
-                "💰 {}",
-                bold(&escape(&format!("{total} {}", draft.currency)))
-            ));
-        }
+/// The names of `people`, or "everyone" for the whole trip.
+fn people_names(trip: &TripView, people: &[MemberId]) -> String {
+    let mut all = trip.member_ids();
+    let mut listed = people.to_vec();
+    all.sort_unstable();
+    listed.sort_unstable();
+    if listed == all && all.len() > 1 {
+        return "everyone".to_string();
+    }
+    people
+        .iter()
+        .map(|member| trip.name(*member))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The solved draft: the total, the payers, how the shares were worked out,
+/// and what each owes (in the trip's currency).
+fn working(trip: &TripView, draft: &Draft, checked: &Checked) -> Vec<String> {
+    let mut lines = vec![format!("💰 {}", bold(&escape(&text::money(checked.total))))];
+    if checked.rate_source != RateSource::Base {
+        let source = match checked.rate_source {
+            RateSource::Base | RateSource::Manual => "your rate",
+            RateSource::Auto => "the day's ECB rate",
+            RateSource::Trip => "the trip's rate",
+        };
+        lines.push(escape(&format!(
+            "   × {} ({source}) = {}",
+            checked.rate,
+            text::money(checked.base_total)
+        )));
     }
 
-    let payers = match (checked, draft.payers.as_slice()) {
-        (_, [only]) => format!("👛 Paid by {}", trip.name(only.member)),
-        (Some(checked), _) => format!(
-            "👛 Paid by {}",
-            checked
-                .payers
-                .iter()
-                .map(|payer| format!("{} {}", trip.name(payer.member), text::number(payer.amount)))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        ),
-        (None, parts) => format!(
-            "👛 Paid by {}",
-            parts
-                .iter()
-                .map(|part| format!("{} {}", trip.name(part.member), part.amount))
-                .collect::<Vec<_>>()
-                .join(" · ")
-        ),
+    let payers = match checked.payers.as_slice() {
+        [only] => trip.name(only.member),
+        payers => payers
+            .iter()
+            .map(|payer| {
+                let rest = if payer.rest { " (the rest)" } else { "" };
+                format!(
+                    "{}{rest} {}",
+                    trip.name(payer.member),
+                    text::number(payer.amount)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · "),
     };
-    lines.push(escape(&payers));
+    lines.push(escape(&format!("👛 Paid by {payers}")));
 
-    let method = match (&draft.kind, &draft.split) {
-        (EntryKind::Settlement, _) => "➡️ To",
-        (_, Split::Equal { .. }) => "➗ Split equally",
-        (_, Split::Shares { .. }) => "➗ Split by shares",
-        (_, Split::Exact { .. }) => "➗ Split exactly",
-    };
-    let shares: Vec<String> = match checked {
-        Some(checked) => checked
+    let owes = |with_weights: bool| {
+        checked
             .shares
             .iter()
             .map(|share| {
-                let weight = match (&draft.split, share.weight) {
-                    (Split::Shares { .. }, Some(weight)) => format!(" ×{weight}"),
-                    (
-                        Split::Exact {
-                            rest: Some(rest), ..
-                        },
-                        _,
-                    ) if *rest == share.member => " (the rest)".to_string(),
-                    _ => String::new(),
-                };
+                let weight = draft
+                    .claims
+                    .iter()
+                    .find_map(|claim| match claim {
+                        Claim::Weight { who, weight } if with_weights && *who == share.member => {
+                            Some(format!(" ×{weight}"))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 format!(
                     "{}{weight} {}",
                     trip.name(share.member),
                     text::number(share.base)
                 )
             })
-            .collect(),
-        None => draft
-            .split
-            .members()
-            .into_iter()
-            .map(|member| trip.name(member))
-            .collect(),
+            .collect::<Vec<_>>()
+            .join(" · ")
     };
-    lines.push(escape(&format!("{method}: {}", shares.join(" · "))));
+
+    if draft.kind == EntryKind::Settlement {
+        lines.push(escape(&format!("➡️ To: {}", owes(false))));
+        return lines;
+    }
+    // A plain split needs no working.
+    if let [Line::Remainder { weighted, .. }] = checked.lines.as_slice() {
+        let method = if *weighted {
+            "➗ Split by shares"
+        } else {
+            "➗ Split equally"
+        };
+        lines.push(escape(&format!("{method}: {}", owes(*weighted))));
+        return lines;
+    }
+    for line in &checked.lines {
+        lines.push(escape(&format!("• {}", working_line(trip, line))));
+    }
+    lines.push(escape(&format!("➗ Owes: {}", owes(false))));
     lines
+}
+
+fn how(how: &How, amount: Money) -> String {
+    match how {
+        How::Given => text::number(amount),
+        How::Each { price, count } => format!(
+            "{} each × {count} = {}",
+            text::number(*price),
+            text::number(amount)
+        ),
+        How::Percent { value, of, base } => format!(
+            "{value}% of {} {} = {}",
+            match of {
+                Base::Total => "the total",
+                Base::Items => "the items",
+            },
+            text::number(*base),
+            text::number(amount)
+        ),
+        How::Rest => format!("the rest, {}", text::number(amount)),
+    }
+}
+
+fn working_line(trip: &TripView, line: &Line) -> String {
+    match line {
+        Line::Item {
+            label,
+            amount,
+            how: how_,
+            people,
+        } => format!(
+            "{label}: {} — {}",
+            how(how_, *amount),
+            people_names(trip, people)
+        ),
+        Line::Share {
+            who,
+            amount,
+            how: how_,
+        } => format!("{}: {}", trip.name(*who), how(how_, *amount)),
+        Line::Extra {
+            label,
+            amount,
+            how: how_,
+            spread,
+        } => format!(
+            "{label}: {} — {}",
+            how(how_, *amount),
+            match spread {
+                Spread::Proportional => "by what each had",
+                Spread::Equal => "equally",
+            }
+        ),
+        Line::Remainder {
+            amount,
+            people,
+            weighted,
+        } => format!(
+            "the rest, {}: {} {}",
+            text::number(*amount),
+            if *weighted {
+                "shared by weight among"
+            } else {
+                "split among"
+            },
+            people_names(trip, people)
+        ),
+    }
+}
+
+/// An unsolved draft, as its claims say it.
+fn said(trip: &TripView, draft: &Draft) -> Vec<String> {
+    let amount = |amount: &Amount| match amount {
+        Amount::Literal { value } => value.to_string(),
+        Amount::Percent { value, of } => format!(
+            "{value}% of {}",
+            match of {
+                Base::Total => "the total",
+                Base::Items => "the items",
+            }
+        ),
+        Amount::Each { value } => format!("{value} each"),
+        Amount::Rest => "the rest".to_string(),
+    };
+    let group = |group: &Group| match group {
+        Group::Everyone => "everyone".to_string(),
+        Group::Only(people) => people_names(trip, people),
+        Group::Except(people) => format!("everyone but {}", people_names(trip, people)),
+        Group::Payers => "those who paid".to_string(),
+    };
+    draft
+        .claims
+        .iter()
+        .map(|claim| {
+            let line = match claim {
+                Claim::Paid { who, amount: paid } => {
+                    format!("👛 {} paid {}", trip.name(*who), amount(paid))
+                }
+                Claim::Total { amount: total } => {
+                    format!("💰 {} {}", amount(total), draft.currency)
+                }
+                Claim::Item {
+                    label,
+                    amount: price,
+                    group: people,
+                } => format!("• {label}: {} — {}", amount(price), group(people)),
+                Claim::Share { who, amount: share } => {
+                    format!("• {}: {}", trip.name(*who), amount(share))
+                }
+                Claim::Weight { who, weight } => {
+                    format!("• {} counts ×{weight}", trip.name(*who))
+                }
+                Claim::Extra {
+                    label,
+                    amount: extra,
+                    ..
+                } => format!("• {label}: {}", amount(extra)),
+                Claim::Remainder { group: people } => {
+                    format!("➗ The rest split among {}", group(people))
+                }
+                Claim::Excluded { members } => {
+                    format!("🚫 Not for {}", people_names(trip, members))
+                }
+            };
+            escape(&line)
+        })
+        .collect()
 }
 
 /// What the keyboard needs besides the draft.
@@ -428,8 +576,12 @@ pub fn keyboard(
             rows
         }
         View::Payers => {
-            let sole = match draft.payers.as_slice() {
-                [only] => Some(only.member),
+            let mut payers = draft.claims.iter().filter_map(|claim| match claim {
+                Claim::Paid { who, .. } => Some(*who),
+                _ => None,
+            });
+            let sole = match (payers.next(), payers.next()) {
+                (Some(only), None) => Some(only),
                 _ => None,
             };
             let mut rows: Vec<_> = trip
@@ -462,7 +614,17 @@ pub fn keyboard(
             rows
         }
         View::Split => {
-            let included = draft.split.members();
+            let included = match draft.kind {
+                EntryKind::Expense => claims::remainder_members(&draft.claims, &trip.member_ids()),
+                EntryKind::Settlement => draft
+                    .claims
+                    .iter()
+                    .filter_map(|claim| match claim {
+                        Claim::Share { who, .. } => Some(*who),
+                        _ => None,
+                    })
+                    .collect(),
+            };
             let mut rows: Vec<_> = trip
                 .members
                 .chunks(3)
@@ -629,7 +791,7 @@ mod tests {
     #[test]
     fn the_card_shows_the_computed_split() {
         let trip = goa();
-        let draft = Draft::expense("dinner & drinks", inr(), dec!(100), 1, vec![1, 2, 3]);
+        let draft = Draft::expense("dinner & drinks", inr(), dec!(100), 1);
         let text = text(
             &trip,
             &draft,
@@ -645,16 +807,20 @@ mod tests {
     }
 
     #[test]
-    fn the_card_shows_who_owes_the_rest() {
+    fn the_card_shows_the_working() {
         let trip = goa();
-        let mut draft = Draft::expense("snacks", inr(), dec!(140), 1, vec![]);
-        draft.split = Split::Exact {
-            amounts: vec![crate::modules::trips::draft::Part {
-                member: 3,
-                amount: dec!(30),
-            }],
-            rest: Some(2),
-        };
+        let mut draft = Draft::expense("snacks", inr(), dec!(140), 1);
+        draft.claims.extend([
+            Claim::Share {
+                who: 3,
+                amount: Amount::literal(dec!(30)),
+            },
+            Claim::Share {
+                who: 2,
+                amount: Amount::Rest,
+            },
+        ]);
+        draft.unclear = vec!["the chips were free".into()];
         let text = text(
             &trip,
             &draft,
@@ -663,15 +829,59 @@ mod tests {
             today(),
         );
         assert!(
-            text.contains("➗ Split exactly: Mom 30.00 · Bob (the rest) 110.00"),
+            text.contains("• Mom: 30.00\n• Bob: the rest, 110.00\n➗ Owes: Bob 110.00 · Mom 30.00"),
+            "{text}"
+        );
+        assert!(
+            text.contains("❓ Not taken into account: the chips were free"),
             "{text}"
         );
     }
 
     #[test]
-    fn the_card_lists_the_problems() {
+    fn the_card_shows_items_and_extras() {
         let trip = goa();
-        let mut draft = Draft::expense("taxi", inr(), dec!(100), 1, vec![]);
+        let mut draft = Draft::new(EntryKind::Expense, inr(), Vec::new());
+        draft.claims = vec![
+            Claim::Item {
+                label: "pizza".into(),
+                amount: Amount::Each { value: dec!(100) },
+                group: Group::Everyone,
+            },
+            Claim::Extra {
+                label: "service".into(),
+                amount: Amount::Percent {
+                    value: dec!(10),
+                    of: Base::Items,
+                },
+                spread: Spread::Equal,
+            },
+            Claim::Paid {
+                who: 2,
+                amount: Amount::Rest,
+            },
+        ];
+        let text = text(
+            &trip,
+            &draft,
+            &checked(&trip, &draft),
+            &TripsSettings::default(),
+            today(),
+        );
+        assert!(
+            text.contains(
+                "💰 <b>330.00 INR</b>\n👛 Paid by Bob\n• pizza: 100.00 each × 3 = 300.00 — \
+                 everyone\n• service: 10% of the items 300.00 = 30.00 — equally\n➗ Owes: Ann \
+                 110.00 · Bob 110.00 · Mom 110.00"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_card_lists_what_was_said_and_the_problems() {
+        let trip = goa();
+        let mut draft = Draft::expense("taxi", inr(), dec!(100), 1);
         draft.currency = Currency::from_code("USD").unwrap();
         let text = text(
             &trip,
@@ -680,14 +890,20 @@ mod tests {
             &TripsSettings::default(),
             today(),
         );
-        assert!(text.contains("💰 <b>100 USD</b>"), "{text}");
-        assert!(text.contains("⚠️ nobody owes anything"), "{text}");
+        assert!(text.contains("👛 Ann paid 100"), "{text}");
+        assert!(
+            text.contains("⚠️ no exchange rate from USD to INR"),
+            "{text}"
+        );
     }
 
     #[test]
     fn keyboards_mark_the_current_choices() {
         let trip = goa();
-        let draft = Draft::expense("dinner", inr(), dec!(100), 2, vec![1, 3]);
+        let mut draft = Draft::expense("dinner", inr(), dec!(100), 2);
+        draft.claims.push(Claim::Remainder {
+            group: Group::Only(vec![1, 3]),
+        });
         let categories = model::categories(&TripsSettings::default());
         let choices = Choices {
             categories: &categories,

@@ -28,6 +28,9 @@ pub struct Model {
     pub spent_on: Date,
     pub split_method: SplitMethod,
     pub origin: Origin,
+    /// What was said about it, as JSON claims; none for entries logged before
+    /// claims were kept.
+    pub claims_json: Option<String>,
     /// The Telegram user who logged the entry.
     pub created_by: i64,
     pub created_at: DateTimeUtc,

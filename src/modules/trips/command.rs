@@ -6,7 +6,8 @@ use rust_decimal::Decimal;
 
 use super::{
     card::Field,
-    draft::{DateSpec, Draft, MemberId, Part, Split},
+    claims,
+    draft::{DateSpec, Draft, MemberId, Part},
     money::{Currency, Rate},
     service::TripView,
 };
@@ -250,11 +251,7 @@ pub fn apply_answer(
     match field {
         Field::Amount => {
             let (amount, currency) = parse_money_text(text)?;
-            let [payer] = draft.payers.as_mut_slice() else {
-                return Err("several people paid: change their amounts with 👛 Paid by".to_string());
-            };
-            payer.amount = amount;
-            draft.stated_total = None;
+            claims::set_amount(&mut draft.claims, amount)?;
             if let Some(currency) = currency {
                 set_currency(draft, currency);
             }
@@ -266,17 +263,16 @@ pub fn apply_answer(
             draft.description = text.to_string();
         }
         Field::Payers => {
-            draft.payers = parse_parts(text, trip)?;
-            draft.stated_total = None;
+            let (amounts, rest) = parse_exact(text, trip)?;
+            claims::set_payers(&mut draft.claims, &pairs(&amounts), rest);
         }
         Field::Shares => {
-            draft.split = Split::Shares {
-                weights: parse_parts(text, trip)?,
-            };
+            let weights = parse_parts(text, trip)?;
+            claims::set_weights(&mut draft.claims, &pairs(&weights));
         }
         Field::Exact => {
             let (amounts, rest) = parse_exact(text, trip)?;
-            draft.split = Split::Exact { amounts, rest };
+            claims::set_shares(&mut draft.claims, &pairs(&amounts), rest);
         }
         Field::Date => draft.date = parse_date(text, today)?,
         Field::Currency => {
@@ -290,6 +286,14 @@ pub fn apply_answer(
         }
     }
     Ok(())
+}
+
+/// Parts as (member, amount) pairs.
+fn pairs(parts: &[Part]) -> Vec<(MemberId, Decimal)> {
+    parts
+        .iter()
+        .map(|part| (part.member, part.amount))
+        .collect()
 }
 
 /// A description's length limit, to keep cards and summaries short.
@@ -477,6 +481,7 @@ mod tests {
     use super::*;
     use crate::{
         db::entities::trips::TripStatus,
+        modules::trips::claims::Claim,
         modules::trips::model::{Member, Trip},
     };
 
@@ -670,7 +675,7 @@ mod tests {
     fn answers_change_the_draft() {
         let trip = goa();
         let today = NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
-        let mut draft = Draft::expense("dinner", currency("INR"), dec!(100), 1, vec![1, 2, 3]);
+        let mut draft = Draft::expense("dinner", currency("INR"), dec!(100), 1);
         let mut answer = |field, text: &str| apply_answer(&mut draft, &trip, field, text, today);
 
         answer(Field::Rate, "80").unwrap();
@@ -680,13 +685,22 @@ mod tests {
         answer(Field::Exact, "Ann 20, Bob 10").unwrap();
         assert!(answer(Field::Currency, "XYZ").is_err());
         assert!(answer(Field::Description, "").is_err());
-        assert_eq!(draft.payers[0].amount, dec!(30));
+        assert_eq!(
+            draft.claims[0],
+            Claim::Paid {
+                who: 1,
+                amount: claims::Amount::literal(dec!(30))
+            }
+        );
         assert_eq!(draft.currency, currency("USD"));
         // The rate was for the previous currency.
         assert_eq!(draft.rate, None);
         assert_eq!(draft.description, "taxi");
         assert_eq!(draft.date, DateSpec::Yesterday);
-        assert_eq!(draft.split.members(), [1, 2]);
+        assert!(draft.claims.contains(&Claim::Share {
+            who: 2,
+            amount: claims::Amount::literal(dec!(10))
+        }));
 
         let mut answer = |field, text: &str| apply_answer(&mut draft, &trip, field, text, today);
         answer(Field::Payers, "Ann 10, Bob 20").unwrap();
@@ -695,6 +709,9 @@ mod tests {
                 .unwrap_err()
                 .contains("several people paid")
         );
+        // With someone paying the rest, the amount is the total.
+        answer(Field::Payers, "Ann 10, Bob rest").unwrap();
+        answer(Field::Amount, "50").unwrap();
     }
 
     #[test]

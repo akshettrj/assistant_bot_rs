@@ -19,7 +19,7 @@ use crate::{
         HandlerResult,
         trips::{
             TripsState,
-            extract::{self, Extraction},
+            extract::{self, Reading, Sources},
             model, service,
             service::TripsError,
         },
@@ -111,9 +111,13 @@ pub async fn read(
         schema: extract::schema(&categories),
         model: ctx.settings.current().config.ai.model.clone(),
     };
-    let outcome = match ai::extract::<Extraction>(llm.as_ref(), &request).await {
-        Ok(extraction) => {
-            extract::to_draft(&extraction, text, &trip, &sender, &categories, today(ctx))
+    let sources = Sources {
+        message: text,
+        card: None,
+    };
+    let drafts = match ai::extract::<Reading>(llm.as_ref(), &request).await {
+        Ok(reading) => {
+            extract::to_drafts(&reading, sources, &trip, &sender, &categories, today(ctx))
                 .map_err(|rejection| rejection.to_string())
         }
         Err(error) => {
@@ -121,21 +125,52 @@ pub async fn read(
             Err(error.to_string())
         }
     };
+    let drafts = match drafts {
+        Ok(drafts) => drafts,
+        Err(problem) => return refuse(bot, &placeholder, &problem).await,
+    };
 
-    match outcome {
-        Ok(draft) => {
-            let stored = service::save_draft(&ctx.db, &trip, msg.chat.id, user.id, &draft).await?;
-            drafts::show_card(bot, ctx, state, &trip, &stored, &placeholder).await
-        }
-        Err(problem) => {
-            let text = format!(
-                "❌ {}\n{}",
-                escape(&problem),
-                escape("Log it with /spent instead, e.g. /spent 2400 dinner")
-            );
-            edit(bot, placeholder.chat.id, placeholder.id, text, None).await
+    // The first card takes the placeholder's place; the others follow it.
+    let mut refused = Vec::new();
+    let mut shown = false;
+    for (number, draft) in (1..).zip(&drafts) {
+        let draft = match draft {
+            Ok(draft) => draft,
+            Err(rejection) => {
+                refused.push(if drafts.len() > 1 {
+                    format!("entry {number}: {rejection}")
+                } else {
+                    rejection.to_string()
+                });
+                continue;
+            }
+        };
+        let stored = service::save_draft(&ctx.db, &trip, msg.chat.id, user.id, draft).await?;
+        if shown {
+            drafts::send_card(bot, ctx, state, &trip, &stored, msg).await?;
+        } else {
+            drafts::show_card(bot, ctx, state, &trip, &stored, &placeholder).await?;
+            shown = true;
         }
     }
+    match (shown, refused.is_empty()) {
+        (_, true) => Ok(()),
+        (false, false) => refuse(bot, &placeholder, &refused.join("\n")).await,
+        (true, false) => {
+            let text = format!("❌ {}", escape(&refused.join("\n")));
+            reply(bot, msg, text).await
+        }
+    }
+}
+
+/// Replaces the placeholder with why nothing could be read.
+async fn refuse(bot: &AssistantBot, placeholder: &Message, problem: &str) -> HandlerResult {
+    let text = format!(
+        "❌ {}\n{}",
+        escape(problem),
+        escape("Log it with /spent instead, e.g. /spent 2400 dinner")
+    );
+    edit(bot, placeholder.chat.id, placeholder.id, text, None).await
 }
 
 #[cfg(test)]

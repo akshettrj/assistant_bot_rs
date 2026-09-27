@@ -20,8 +20,9 @@ use crate::{
         trips::{
             ID, TripsState,
             card::{self, Action, Field, View},
+            claims,
             command::{self, SPENT_USAGE},
-            draft::{Draft, Part, Split},
+            draft::Draft,
             model, service,
             service::{StoredDraft, TripView, TripsError},
             text,
@@ -58,7 +59,6 @@ pub async fn spent(
             spent.currency.unwrap_or(trip.trip.base),
             spent.amount,
             payer.id,
-            trip.member_ids(),
         );
         if let Some(tag) = spent.category {
             let known = model::categories(&current_settings(ctx))
@@ -185,32 +185,20 @@ pub async fn press(
             View::Main
         }
         Action::PaidBy(member) => {
-            let amount = draft.payers.iter().map(|part| part.amount).sum();
-            draft.payers = vec![Part { member, amount }];
-            draft.stated_total = None;
+            claims::set_payer(&mut draft.claims, member);
             View::Main
         }
         // A settlement goes to one member.
         Action::Toggle(member) if draft.kind == EntryKind::Settlement => {
-            draft.split = Split::Equal {
-                members: vec![member],
-            };
+            claims::set_recipient(&mut draft.claims, member);
             View::Main
         }
         Action::Toggle(member) => {
-            let mut members = draft.split.members();
-            if let Some(position) = members.iter().position(|included| *included == member) {
-                members.remove(position);
-            } else {
-                members.push(member);
-            }
-            draft.split = Split::Equal { members };
+            claims::toggle_remainder(&mut draft.claims, member, &trip.member_ids());
             View::Split
         }
         Action::Everyone => {
-            draft.split = Split::Equal {
-                members: trip.member_ids(),
-            };
+            claims::set_remainder(&mut draft.claims, claims::Group::Everyone);
             View::Split
         }
         Action::Date(date) => {

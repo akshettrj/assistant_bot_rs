@@ -41,6 +41,8 @@ pub struct EntryData {
     pub spent_on: NaiveDate,
     pub split_method: SplitMethod,
     pub origin: Origin,
+    /// What was said about it, as JSON.
+    pub claims_json: Option<String>,
     pub payers: Vec<Payer>,
     pub shares: Vec<Share>,
 }
@@ -209,6 +211,7 @@ fn entry_fields(data: &EntryData) -> entries::ActiveModel {
         spent_on: Set(data.spent_on),
         split_method: Set(data.split_method),
         origin: Set(data.origin),
+        claims_json: Set(data.claims_json.clone()),
         ..Default::default()
     }
 }
@@ -345,6 +348,7 @@ mod tests {
             spent_on: NaiveDate::from_ymd_opt(2026, 9, 27).unwrap(),
             split_method: SplitMethod::Equal,
             origin: Origin::Manual,
+            claims_json: Some("[]".into()),
             payers: vec![
                 Payer {
                     member_id: ann.id,
@@ -389,6 +393,7 @@ mod tests {
             spent_on: entry.spent_on,
             split_method: entry.split_method,
             origin: entry.origin,
+            claims_json: entry.claims_json.clone(),
             payers: record
                 .payers
                 .iter()

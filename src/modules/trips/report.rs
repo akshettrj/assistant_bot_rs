@@ -320,6 +320,7 @@ mod tests {
                 updated_at: now,
                 deleted_at: None,
                 deleted_by: None,
+                claims_json: None,
             },
             payers: vec![entry_payers::Model {
                 entry_id: id,

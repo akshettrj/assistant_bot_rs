@@ -11,6 +11,7 @@
 //! saved when its author presses ✅.
 
 pub mod card;
+pub mod claims;
 pub mod command;
 pub mod draft;
 pub mod extract;

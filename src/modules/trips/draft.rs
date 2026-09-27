@@ -1,12 +1,16 @@
-//! Drafts: an entry as its author describes it, and [`check`], which turns it
-//! into amounts the ledger can take. All the maths of an entry happens here,
-//! whoever wrote the draft (a command, the card's buttons, or the AI).
+//! Drafts: an entry as its author describes it, as [`Claim`]s, and [`check`],
+//! which turns it into amounts the ledger can take. All the maths of an entry
+//! happens in [`claims::solve`], whoever wrote the draft (a command, the
+//! card's buttons, or the AI).
 
 use chrono::{Datelike, NaiveDate, TimeDelta, Weekday};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::money::{Currency, Money, MoneyError, Rate};
+use super::{
+    claims::{self, Amount, Claim, Line, Subject},
+    money::{Currency, Money, MoneyError, Rate},
+};
 use crate::db::entities::entries::{EntryKind, Origin, RateSource};
 
 /// A member of the trip, by id.
@@ -20,11 +24,8 @@ pub struct Draft {
     /// A category id.
     pub category: String,
     pub currency: Currency,
-    /// Who paid how much, in `currency`. The total is their sum.
-    pub payers: Vec<Part>,
-    /// A total stated along with the payers, which must match their sum.
-    pub stated_total: Option<Decimal>,
-    pub split: Split,
+    /// What was said about it: who paid, who had what.
+    pub claims: Vec<Claim>,
     pub date: DateSpec,
     /// A rate given for this entry, overriding the trip's and the day's.
     pub rate: Option<Rate>,
@@ -36,45 +37,16 @@ pub struct Draft {
     /// The entry this draft edits, if any.
     #[serde(default)]
     pub replaces: Option<i32>,
+    /// What the AI read but couldn't express as claims, shown on the card.
+    #[serde(default)]
+    pub unclear: Vec<String>,
 }
 
-/// A member and an amount (or a weight).
+/// A member and an amount (or a weight), as typed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Part {
     pub member: MemberId,
     pub amount: Decimal,
-}
-
-/// Who owes the total.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "method", rename_all = "snake_case")]
-pub enum Split {
-    /// Everyone listed owes the same.
-    Equal { members: Vec<MemberId> },
-    /// In proportion to weights: a couple may count as 2.
-    Shares { weights: Vec<Part> },
-    /// Exact amounts, in the entry's currency, adding up to the total; or
-    /// all but one, `rest`, who owes what is left.
-    Exact {
-        amounts: Vec<Part>,
-        #[serde(default)]
-        rest: Option<MemberId>,
-    },
-}
-
-impl Split {
-    /// The members who owe something.
-    pub fn members(&self) -> Vec<MemberId> {
-        match self {
-            Self::Equal { members } => members.clone(),
-            Self::Shares { weights: parts } => parts.iter().map(|part| part.member).collect(),
-            Self::Exact { amounts, rest } => amounts
-                .iter()
-                .map(|part| part.member)
-                .chain(*rest)
-                .collect(),
-        }
-    }
 }
 
 /// A date as said: resolved against today by [`DateSpec::resolve`], so that
@@ -105,41 +77,55 @@ impl DateSpec {
 }
 
 impl Draft {
-    /// An expense `payer` paid in full, split equally among `members`.
-    pub fn expense(
-        description: impl Into<String>,
-        currency: Currency,
-        amount: Decimal,
-        payer: MemberId,
-        members: Vec<MemberId>,
-    ) -> Self {
+    /// An expense of `claims`, today, in `currency`.
+    pub fn new(kind: EntryKind, currency: Currency, claims: Vec<Claim>) -> Self {
         Self {
-            kind: EntryKind::Expense,
-            description: description.into(),
+            kind,
+            description: String::new(),
             category: super::model::DEFAULT_CATEGORY.to_string(),
             currency,
-            payers: vec![Part {
-                member: payer,
-                amount,
-            }],
-            stated_total: None,
-            split: Split::Equal { members },
+            claims,
             date: DateSpec::Today,
             rate: None,
             rate_source: None,
             origin: Origin::Manual,
             replaces: None,
+            unclear: Vec::new(),
+        }
+    }
+
+    /// An expense `payer` paid in full, shared equally by everyone.
+    pub fn expense(
+        description: impl Into<String>,
+        currency: Currency,
+        amount: Decimal,
+        payer: MemberId,
+    ) -> Self {
+        let paid = Claim::Paid {
+            who: payer,
+            amount: Amount::literal(amount),
+        };
+        Self {
+            description: description.into(),
+            ..Self::new(EntryKind::Expense, currency, vec![paid])
         }
     }
 
     /// `from` paying `amount` back to `to`.
     pub fn settlement(currency: Currency, amount: Decimal, from: MemberId, to: MemberId) -> Self {
+        let claims = vec![
+            Claim::Paid {
+                who: from,
+                amount: Amount::literal(amount),
+            },
+            Claim::Share {
+                who: to,
+                amount: Amount::Rest,
+            },
+        ];
         Self {
-            kind: EntryKind::Settlement,
             description: "settlement".to_string(),
-            category: super::model::DEFAULT_CATEGORY.to_string(),
-            split: Split::Equal { members: vec![to] },
-            ..Self::expense("", currency, amount, from, Vec::new())
+            ..Self::new(EntryKind::Settlement, currency, claims)
         }
     }
 }
@@ -149,7 +135,7 @@ impl Draft {
 pub struct Context<'a> {
     /// The trip's currency.
     pub base: Currency,
-    /// The trip's members.
+    /// The trip's members, in order.
     pub members: &'a [MemberId],
     pub today: NaiveDate,
     /// The rate for the draft's currency when it gives none: the trip's
@@ -169,12 +155,16 @@ pub struct Checked {
     pub spent_on: NaiveDate,
     pub payers: Vec<CheckedPayer>,
     pub shares: Vec<CheckedShare>,
+    /// How the shares were worked out, in the entry's currency.
+    pub lines: Vec<Line>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedPayer {
     pub member: MemberId,
     pub amount: Money,
+    /// Whether they paid what the others didn't.
+    pub rest: bool,
     /// In the trip's currency.
     pub base: Money,
 }
@@ -182,8 +172,8 @@ pub struct CheckedPayer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedShare {
     pub member: MemberId,
-    pub weight: Option<Decimal>,
-    pub exact: Option<Money>,
+    /// What they owe, in the entry's currency.
+    pub amount: Money,
     /// In the trip's currency.
     pub base: Money,
 }
@@ -192,66 +182,89 @@ pub struct CheckedShare {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Problem {
     NoPayer,
+    /// Nobody owes anything.
     NoShare,
-    /// Amounts paid, weights and exact amounts must be positive.
-    NotPositive(MemberId),
-    /// Listed twice among the payers, or in the split.
-    Twice(MemberId),
+    NotPositive(Subject),
     /// No longer on the trip.
     NotAMember(MemberId),
     Money(MoneyError),
-    TotalMismatch {
-        paid: Money,
-        stated: Decimal,
+    /// Nothing says, or lets work out, the total.
+    NeedTotal,
+    /// "The rest" is said twice, for payments or for what is owed.
+    TwoRests,
+    Unsupported {
+        subject: Subject,
+        what: &'static str,
     },
-    ExactMismatch {
-        split: Money,
+    TotalsDiffer {
+        first: Money,
+        second: Money,
+    },
+    PaidMismatch {
+        paid: Money,
         total: Money,
     },
+    /// More is owed than the total.
+    OwedMismatch {
+        owed: Money,
+        total: Money,
+    },
+    /// The others take the whole total, leaving nothing for `subject`.
+    NothingLeft {
+        subject: Subject,
+        total: Money,
+        others: Money,
+    },
+    /// Nobody to share it.
+    EmptyGroup(Subject),
     NeedRate {
         from: Currency,
         to: Currency,
     },
     /// A settlement is one member paying another.
     NotATransfer,
-    /// The exact amounts leave nothing for the one owing the rest.
-    NothingLeft {
-        member: MemberId,
-        split: Money,
-        total: Money,
-    },
 }
 
 impl Problem {
     /// The problem in words, with `name` naming members.
     pub fn describe(&self, name: impl Fn(MemberId) -> String) -> String {
         match self {
-            Self::NoPayer => "nobody paid".to_string(),
+            Self::NoPayer => "nobody paid: choose who did".to_string(),
             Self::NoShare => "nobody owes anything: choose who shares it".to_string(),
-            Self::NotPositive(member) => {
-                format!("{}'s amount must be more than zero", name(*member))
+            Self::NotPositive(subject) => {
+                format!("{} must be more than zero", subject.describe(&name))
             }
-            Self::Twice(member) => format!("{} is listed twice", name(*member)),
             Self::NotAMember(member) => format!("{} is not on the trip", name(*member)),
             Self::Money(error) => error.to_string(),
-            Self::TotalMismatch { paid, stated } => {
-                format!("the payers paid {paid}, but the total is {stated}")
+            Self::NeedTotal => "I can't tell the total: give it, or what everyone paid".to_string(),
+            Self::TwoRests => "\"the rest\" can only go to one person".to_string(),
+            Self::Unsupported { subject, what } => {
+                format!("{} can't be {what}", subject.describe(&name))
             }
-            Self::ExactMismatch { split, total } => {
-                format!("the amounts owed add up to {split}, not {total}")
+            Self::TotalsDiffer { first, second } => {
+                format!("the total is given as {first} and as {second}")
+            }
+            Self::PaidMismatch { paid, total } => {
+                format!("the payers paid {paid}, but the total is {total}")
+            }
+            Self::OwedMismatch { owed, total } => {
+                format!("{owed} is owed, more than the total of {total}")
+            }
+            Self::NothingLeft {
+                subject,
+                total,
+                others,
+            } => format!(
+                "the rest leaves nothing for {}: {others} of {total} is already accounted for",
+                subject.describe(&name)
+            ),
+            Self::EmptyGroup(subject) => {
+                format!("nobody shares {}", subject.describe(&name))
             }
             Self::NeedRate { from, to } => {
                 format!("no exchange rate from {from} to {to}: set one")
             }
             Self::NotATransfer => "a settlement is one person paying another".to_string(),
-            Self::NothingLeft {
-                member,
-                split,
-                total,
-            } => format!(
-                "the others owe {split} of {total}, which leaves nothing for {}",
-                name(*member)
-            ),
         }
     }
 }
@@ -262,201 +275,100 @@ impl From<MoneyError> for Problem {
     }
 }
 
-/// Checks `draft` and computes its amounts: the total (the payers' sum), its
-/// value in the trip's currency, and everyone's part of it. Every problem
-/// found is reported.
+/// Checks `draft` and computes its amounts: the total, its value in the
+/// trip's currency, and everyone's part of it. Every problem found is
+/// reported.
 pub fn check(draft: &Draft, context: &Context<'_>) -> Result<Checked, Vec<Problem>> {
-    let mut problems = Vec::new();
     let currency = draft.currency;
-
-    check_members(
-        draft.payers.iter().map(|part| part.member),
-        context,
-        &mut problems,
-    );
-    check_members(draft.split.members(), context, &mut problems);
-    if draft.payers.is_empty() {
-        problems.push(Problem::NoPayer);
-    }
-
-    let payers = amounts(&draft.payers, currency, &mut problems);
-    let total = Money::sum(currency, payers.iter().map(|(_, amount)| *amount));
-    let total = match total {
-        Ok(total) => total,
-        Err(error) => {
-            problems.push(error.into());
-            return Err(problems);
-        }
+    let solved = claims::solve(&draft.claims, context.members, currency);
+    let mut problems = match &solved {
+        Ok(_) => Vec::new(),
+        Err(problems) => problems.clone(),
     };
-    if let Some(stated) = draft.stated_total
-        && stated != total.amount()
-    {
-        problems.push(Problem::TotalMismatch {
-            paid: total,
-            stated,
-        });
-    }
 
-    // The split, as weights for the allocation.
-    let weights: Vec<(MemberId, Decimal, Option<Money>)> = match &draft.split {
-        Split::Equal { members } => members
-            .iter()
-            .map(|member| (*member, Decimal::ONE, None))
-            .collect(),
-        Split::Shares { weights } => weights
-            .iter()
-            .filter(|part| {
-                let positive = part.amount > Decimal::ZERO;
-                if !positive {
-                    problems.push(Problem::NotPositive(part.member));
-                }
-                positive
-            })
-            .map(|part| (part.member, part.amount, None))
-            .collect(),
-        Split::Exact {
-            amounts: parts,
-            rest,
-        } => {
-            let mut exact = amounts(parts, currency, &mut problems);
-            match (
-                Money::sum(currency, exact.iter().map(|(_, amount)| *amount)),
-                rest,
-            ) {
-                (Ok(split), None) if split != total => {
-                    problems.push(Problem::ExactMismatch { split, total });
-                }
-                // The one owing the rest owes what the others don't.
-                (Ok(split), Some(member)) => match total.checked_sub(split) {
-                    Ok(left) if left.amount() > Decimal::ZERO => exact.push((*member, left)),
-                    Ok(_) => problems.push(Problem::NothingLeft {
-                        member: *member,
-                        split,
-                        total,
-                    }),
-                    Err(error) => problems.push(error.into()),
-                },
-                (Ok(_), None) => {}
-                (Err(error), _) => problems.push(error.into()),
-            }
-            exact
-                .into_iter()
-                .map(|(member, amount)| (member, amount.amount(), Some(amount)))
-                .collect()
-        }
-    };
-    if weights.is_empty() {
-        problems.push(Problem::NoShare);
-    }
-
-    if draft.kind == EntryKind::Settlement
-        && (payers.len() != 1 || weights.len() != 1 || payers[0].0 == weights[0].0)
+    if let Ok(solution) = &solved
+        && draft.kind == EntryKind::Settlement
+        && (solution.paid.len() != 1
+            || solution.owed.len() != 1
+            || solution.paid[0].member == solution.owed[0].0)
     {
         problems.push(Problem::NotATransfer);
     }
 
-    let (rate, rate_source) = if currency == context.base {
-        (Rate::ONE, RateSource::Base)
+    let rate = if currency == context.base {
+        Some((Rate::ONE, RateSource::Base))
     } else if let Some(rate) = draft.rate {
-        (rate, draft.rate_source.unwrap_or(RateSource::Manual))
-    } else if let Some(known) = context.known_rate {
-        known
+        Some((rate, draft.rate_source.unwrap_or(RateSource::Manual)))
     } else {
+        context.known_rate
+    };
+    if rate.is_none() {
         problems.push(Problem::NeedRate {
             from: currency,
             to: context.base,
         });
+    }
+
+    let (Ok(solution), Some((rate, rate_source)), true) = (solved, rate, problems.is_empty())
+    else {
         return Err(problems);
     };
-
-    if !problems.is_empty() {
-        return Err(problems);
-    }
 
     let allocate = |base_total: Money, weights: Vec<Decimal>| {
         base_total
             .allocate(&weights)
             .map_err(|error| vec![error.into()])
     };
-    let base_total = total
+    let base_total = solution
+        .total
         .convert(rate, context.base)
         .map_err(|error| vec![error.into()])?;
     let payer_bases = allocate(
         base_total,
-        payers.iter().map(|(_, amount)| amount.amount()).collect(),
+        solution
+            .paid
+            .iter()
+            .map(|payment| payment.amount.amount())
+            .collect(),
     )?;
     let share_bases = allocate(
         base_total,
-        weights.iter().map(|(_, weight, _)| *weight).collect(),
+        solution
+            .owed
+            .iter()
+            .map(|(_, amount)| amount.amount())
+            .collect(),
     )?;
 
     Ok(Checked {
-        total,
+        total: solution.total,
         rate,
         rate_source,
         base_total,
         spent_on: draft.date.resolve(context.today),
-        payers: payers
+        payers: solution
+            .paid
             .into_iter()
             .zip(payer_bases)
-            .map(|((member, amount), base)| CheckedPayer {
+            .map(|(payment, base)| CheckedPayer {
+                member: payment.member,
+                amount: payment.amount,
+                rest: payment.rest,
+                base,
+            })
+            .collect(),
+        shares: solution
+            .owed
+            .into_iter()
+            .zip(share_bases)
+            .map(|((member, amount), base)| CheckedShare {
                 member,
                 amount,
                 base,
             })
             .collect(),
-        shares: weights
-            .into_iter()
-            .zip(share_bases)
-            .map(|((member, weight, exact), base)| CheckedShare {
-                member,
-                weight: exact.is_none().then_some(weight),
-                exact,
-                base,
-            })
-            .collect(),
+        lines: solution.lines,
     })
-}
-
-/// Reports members listed twice or not on the trip.
-fn check_members(
-    members: impl IntoIterator<Item = MemberId>,
-    context: &Context<'_>,
-    problems: &mut Vec<Problem>,
-) {
-    let mut seen = Vec::new();
-    for member in members {
-        if !context.members.contains(&member) {
-            problems.push(Problem::NotAMember(member));
-        } else if seen.contains(&member) {
-            problems.push(Problem::Twice(member));
-        }
-        seen.push(member);
-    }
-}
-
-/// The positive amounts of `parts` as money, reporting the others.
-fn amounts(
-    parts: &[Part],
-    currency: Currency,
-    problems: &mut Vec<Problem>,
-) -> Vec<(MemberId, Money)> {
-    parts
-        .iter()
-        .filter_map(|part| {
-            if part.amount <= Decimal::ZERO {
-                problems.push(Problem::NotPositive(part.member));
-                return None;
-            }
-            match Money::new(part.amount, currency) {
-                Ok(amount) => Some((part.member, amount)),
-                Err(error) => {
-                    problems.push(error.into());
-                    None
-                }
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -464,6 +376,7 @@ mod tests {
     use rust_decimal::dec;
 
     use super::*;
+    use crate::modules::trips::claims::Group;
 
     const ANN: MemberId = 1;
     const BOB: MemberId = 2;
@@ -489,11 +402,14 @@ mod tests {
     }
 
     fn dinner() -> Draft {
-        Draft::expense("dinner", currency("INR"), dec!(100), ANN, MEMBERS.to_vec())
+        Draft::expense("dinner", currency("INR"), dec!(100), ANN)
     }
 
-    fn part(member: MemberId, amount: Decimal) -> Part {
-        Part { member, amount }
+    fn paid(who: MemberId, value: Decimal) -> Claim {
+        Claim::Paid {
+            who,
+            amount: Amount::literal(value),
+        }
     }
 
     fn bases(checked: &Checked) -> (Vec<Decimal>, Vec<Decimal>) {
@@ -524,80 +440,10 @@ mod tests {
     }
 
     #[test]
-    fn the_total_is_what_the_payers_paid() {
-        let mut draft = dinner();
-        draft.payers = vec![part(ANN, dec!(1000)), part(BOB, dec!(1400))];
-        let checked = check(&draft, &context()).unwrap();
-        assert_eq!(checked.total.amount(), dec!(2400));
-
-        draft.stated_total = Some(dec!(2500));
-        assert_eq!(
-            check(&draft, &context()),
-            Err(vec![Problem::TotalMismatch {
-                paid: checked.total,
-                stated: dec!(2500),
-            }])
-        );
-    }
-
-    #[test]
-    fn shares_and_exact_amounts() {
-        let mut draft = dinner();
-        draft.split = Split::Shares {
-            weights: vec![part(ANN, dec!(2)), part(BOB, dec!(1))],
-        };
-        let checked = check(&draft, &context()).unwrap();
-        assert_eq!(bases(&checked).1, [dec!(66.67), dec!(33.33)]);
-        assert_eq!(checked.shares[0].weight, Some(dec!(2)));
-
-        draft.split = Split::Exact {
-            amounts: vec![part(ANN, dec!(70)), part(CAT, dec!(30))],
-            rest: None,
-        };
-        let checked = check(&draft, &context()).unwrap();
-        assert_eq!(bases(&checked).1, [dec!(70), dec!(30)]);
-        assert_eq!(checked.shares[1].exact.unwrap().amount(), dec!(30));
-        assert_eq!(checked.shares[1].weight, None);
-
-        draft.split = Split::Exact {
-            amounts: vec![part(ANN, dec!(70))],
-            rest: None,
-        };
-        assert!(matches!(
-            check(&draft, &context()).unwrap_err()[..],
-            [Problem::ExactMismatch { .. }]
-        ));
-    }
-
-    #[test]
-    fn one_member_may_owe_the_rest() {
-        // Ann paid 50 and Bob 90; Cat had 30, and Bob the rest.
-        let mut draft = dinner();
-        draft.payers = vec![part(ANN, dec!(50)), part(BOB, dec!(90))];
-        draft.split = Split::Exact {
-            amounts: vec![part(CAT, dec!(30))],
-            rest: Some(BOB),
-        };
-        assert_eq!(draft.split.members(), [CAT, BOB]);
-        let checked = check(&draft, &context()).unwrap();
-        assert_eq!(bases(&checked).1, [dec!(30), dec!(110)]);
-        assert_eq!(checked.shares[1].exact.unwrap().amount(), dec!(110));
-
-        draft.split = Split::Exact {
-            amounts: vec![part(CAT, dec!(140))],
-            rest: Some(BOB),
-        };
-        assert!(matches!(
-            check(&draft, &context()).unwrap_err()[..],
-            [Problem::NothingLeft { member: BOB, .. }]
-        ));
-    }
-
-    #[test]
     fn foreign_expenses_are_converted_once_and_allocated() {
         let mut draft = dinner();
         draft.currency = currency("USD");
-        draft.payers = vec![part(ANN, dec!(10)), part(BOB, dec!(20))];
+        draft.claims = vec![paid(ANN, dec!(10)), paid(BOB, dec!(20))];
         assert_eq!(
             check(&draft, &context()),
             Err(vec![Problem::NeedRate {
@@ -630,27 +476,37 @@ mod tests {
     }
 
     #[test]
-    fn every_problem_is_reported() {
+    fn claims_problems_and_rate_problems_are_reported_together() {
         let mut draft = dinner();
-        draft.payers = vec![part(ANN, dec!(12.345)), part(9, dec!(-1))];
-        draft.split = Split::Equal {
-            members: vec![BOB, BOB],
-        };
+        draft.currency = currency("USD");
+        draft.claims = vec![paid(9, dec!(12.345))];
         let problems = check(&draft, &context()).unwrap_err();
-        assert!(problems.contains(&Problem::NotAMember(9)));
-        assert!(problems.contains(&Problem::Twice(BOB)));
-        assert!(problems.contains(&Problem::NotPositive(9)));
+        assert!(problems.contains(&Problem::NotAMember(9)), "{problems:?}");
         assert!(
             problems
                 .iter()
                 .any(|problem| matches!(problem, Problem::Money(MoneyError::TooPrecise { .. })))
         );
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem, Problem::NeedRate { .. }))
+        );
+    }
 
-        draft.payers.clear();
-        draft.split = Split::Equal { members: vec![] };
-        let problems = check(&draft, &context()).unwrap_err();
-        assert!(problems.contains(&Problem::NoPayer));
-        assert!(problems.contains(&Problem::NoShare));
+    #[test]
+    fn a_group_limits_who_shares() {
+        let mut draft = dinner();
+        draft.claims.push(Claim::Remainder {
+            group: Group::Only(vec![ANN, CAT]),
+        });
+        let checked = check(&draft, &context()).unwrap();
+        let shares: Vec<_> = checked
+            .shares
+            .iter()
+            .map(|share| (share.member, share.amount.amount()))
+            .collect();
+        assert_eq!(shares, [(ANN, dec!(50)), (CAT, dec!(50))]);
     }
 
     #[test]
@@ -658,6 +514,7 @@ mod tests {
         let settlement = Draft::settlement(currency("INR"), dec!(500), BOB, ANN);
         let checked = check(&settlement, &context()).unwrap();
         assert_eq!(bases(&checked), (vec![dec!(500)], vec![dec!(500)]));
+        assert_eq!(checked.shares[0].member, ANN);
 
         let to_self = Draft::settlement(currency("INR"), dec!(500), BOB, BOB);
         assert_eq!(
@@ -688,10 +545,12 @@ mod tests {
     #[test]
     fn drafts_round_trip_through_json() {
         let mut draft = dinner();
-        draft.split = Split::Shares {
-            weights: vec![part(ANN, dec!(1.5))],
-        };
+        draft.claims.push(Claim::Weight {
+            who: ANN,
+            weight: dec!(1.5),
+        });
         draft.date = DateSpec::Weekday(Weekday::Fri);
+        draft.unclear = vec!["the wine was free".into()];
         let json = serde_json::to_string(&draft).unwrap();
         assert_eq!(serde_json::from_str::<Draft>(&json).unwrap(), draft);
     }

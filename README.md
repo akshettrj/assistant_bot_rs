@@ -327,10 +327,18 @@ With the AI set up (see [AI](#ai)), you can also write in plain words, after
 for the hotel yesterday`, `/ai $30 taxi`. Set `modules.trips.ai_keyword` (e.g.
 `log`) to also read messages starting with that word ("log dinner 2400"); in
 groups, the bot only sees those with its privacy mode off. Nothing else is read
-by the AI. It only copies what the message says into a draft card
-marked 🤖, which you check and save as usual. It never does the maths: any
-amount it gives that isn't written in your message is refused, and every
-total, share and conversion is computed by the bot.
+by the AI.
+
+The AI transcribes the message into claims (who paid, who had what, what was
+on top) and the bot works them out, so most ways of saying it work: "Carol
+paid 50, I paid 90, Dave's total was 30, Erin's the rest", "pizza 300 for
+me, Bob's pasta 400, a 200 starter for all but Mom, plus 10% service",
+"museum 300 each for the three of us", "Ann counts double", "30 USD at 84",
+several expenses in one message, and settlements ("Bob sent me 200"). Each
+lands on a draft card marked 🤖 with the working shown, which you check and
+save as usual; anything the AI couldn't place is listed on the card. It never
+does the maths: any number it gives that isn't written in your message is
+refused, and every total, share and conversion is computed by the bot.
 
 ## AI
 

@@ -81,12 +81,34 @@ settle-up, with optional AI parsing of messages and receipts.
 - Commands: `/trip` (panel: new, use, join, members, rates, end, reopen),
   `/spent`, `/balance`, `/settle`, `/export`.
 
+## Claims
+
+An entry is described by **claims**, statements that compose, rather than by a
+form (`claims.rs`):
+
+- `paid` who, amount · `total` amount · `item` label, amount, group ·
+  `share` who, amount · `weight` who, weight · `extra` label, amount, spread
+  (proportional or equal) · `remainder` group · `excluded` members.
+- Amounts: a number as written, a percentage of the total or of the items, so
+  much `each` (items), or `rest`.
+- Groups: everyone (bar the excluded), only some, everyone except some, the
+  payers.
+
+`claims::solve` works out, in a fixed order: the total (stated, else paid,
+else owed); items, shares and extras, then the rest, then the remainder among
+its group by weight (everyone, by default); the payments, one maybe the rest;
+and who owes what, extras spread by what each had or equally. It records its
+working for the card, and reports what's missing or inconsistent as problems
+rather than refusing. Commands and the card's buttons edit claims too, and an
+entry keeps its claims (`entries.claims_json`) so that editing it starts from
+them.
+
 ## AI
 
 - **No maths by the AI**:
-  1. The extraction schema has no computed fields: amounts as written,
-     currency, payers, description, category, date as written, and a split
-     spec (`{equal: [..]}`, `{shares: {..}}`, `{exact: {..}}`).
+  1. The AI transcribes the message into entries of claims: no field holds a
+     computed number, and what follows from other numbers is `rest`. What it
+     can't express goes in `unclear`, shown on the card.
   2. Every amount returned must appear literally in the user's text (as a
      number of its own: `400` is not in `2,400`), or the message is refused.
   3. Receipts: the AI extracts line items and the printed total; Rust sums the

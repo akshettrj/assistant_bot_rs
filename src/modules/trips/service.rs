@@ -7,7 +7,8 @@ use sea_orm::{DatabaseConnection, DbErr, TransactionTrait};
 use teloxide::types::{ChatId, MessageId, UserId};
 
 use super::{
-    draft::{self, Checked, Context, DateSpec, Draft, MemberId, Part, Problem, Split},
+    claims::{Amount, Claim, Group, Line},
+    draft::{self, Checked, Context, DateSpec, Draft, MemberId, Problem},
     ledger::{Balances, LedgerError, Transfer},
     model::{Member, Trip},
     money::{Currency, Money, Rate},
@@ -295,8 +296,11 @@ pub async fn find_draft(db: &DatabaseConnection, id: i32) -> Result<StoredDraft>
         chat: ChatId(stored.chat_id),
         card: stored.message_id.map(MessageId),
         author: UserId(stored.created_by.unsigned_abs()),
-        draft: serde_json::from_str(&stored.json)
-            .map_err(|error| TripsError::Corrupt(format!("draft {id}: {error}")))?,
+        // Drafts from before a change of format just expire.
+        draft: serde_json::from_str(&stored.json).map_err(|error| {
+            tracing::debug!(%error, id, "an unreadable draft");
+            TripsError::DraftExpired
+        })?,
     })
 }
 
@@ -533,69 +537,68 @@ pub async fn edit_entry(
     save_draft(db, trip, chat, by, &draft).await
 }
 
-/// The draft an entry was saved from, keeping its frozen rate.
+/// The draft an entry was saved from, keeping its frozen rate: its claims when
+/// they were kept, else claims made from its amounts.
 fn draft_of(record: &EntryRecord) -> Result<Draft> {
     let entry = &record.entry;
-    let currency = Currency::from_code(&entry.currency)
-        .map_err(|error| TripsError::Corrupt(error.to_string()))?;
-    let parts =
-        |value: fn(&crate::db::entities::entry_shares::Model) -> Option<rust_decimal::Decimal>| {
-            record
-                .shares
-                .iter()
-                .map(|share| {
-                    value(share)
-                        .map(|amount| Part {
-                            member: share.member_id,
-                            amount,
-                        })
-                        .ok_or_else(|| {
-                            TripsError::Corrupt(format!(
-                                "entry {}: a share lacks its input",
-                                entry.id
-                            ))
-                        })
-                })
-                .collect::<Result<Vec<_>>>()
-        };
-    let split = match entry.split_method {
-        SplitMethod::Equal => Split::Equal {
-            members: record.shares.iter().map(|share| share.member_id).collect(),
-        },
-        SplitMethod::Shares => Split::Shares {
-            weights: parts(|share| share.weight.map(|weight| weight.0))?,
-        },
-        // Each amount, the rest included, was stored.
-        SplitMethod::Exact => Split::Exact {
-            amounts: parts(|share| share.exact.map(|exact| exact.0))?,
-            rest: None,
-        },
+    let corrupt = |error: String| TripsError::Corrupt(format!("entry {}: {error}", entry.id));
+    let currency =
+        Currency::from_code(&entry.currency).map_err(|error| corrupt(error.to_string()))?;
+    let claims = match &entry.claims_json {
+        Some(json) => serde_json::from_str(json).map_err(|error| corrupt(error.to_string()))?,
+        None => stored_claims(record),
     };
     let rate = match entry.rate_source {
         RateSource::Base => None,
-        _ => Some(Rate::new(entry.rate.0).map_err(|error| TripsError::Corrupt(error.to_string()))?),
+        _ => Some(Rate::new(entry.rate.0).map_err(|error| corrupt(error.to_string()))?),
     };
     Ok(Draft {
         kind: entry.kind,
         description: entry.description.clone(),
         category: entry.category.clone(),
         currency,
-        payers: record
-            .payers
-            .iter()
-            .map(|payer| Part {
-                member: payer.member_id,
-                amount: payer.amount.0,
-            })
-            .collect(),
-        stated_total: None,
-        split,
+        claims,
         date: DateSpec::On(entry.spent_on),
         rate,
         rate_source: rate.map(|_| entry.rate_source),
         origin: entry.origin,
         replaces: Some(entry.id),
+        unclear: Vec::new(),
     })
+}
+
+/// Claims for an entry logged before claims were kept, from its amounts.
+fn stored_claims(record: &EntryRecord) -> Vec<Claim> {
+    let mut claims: Vec<Claim> = record
+        .payers
+        .iter()
+        .map(|payer| Claim::Paid {
+            who: payer.member_id,
+            amount: Amount::literal(payer.amount.0),
+        })
+        .collect();
+    let sharing = || Claim::Remainder {
+        group: Group::Only(record.shares.iter().map(|share| share.member_id).collect()),
+    };
+    match record.entry.split_method {
+        SplitMethod::Equal => claims.push(sharing()),
+        SplitMethod::Shares => {
+            claims.extend(record.shares.iter().filter_map(|share| {
+                share.weight.map(|weight| Claim::Weight {
+                    who: share.member_id,
+                    weight: weight.0,
+                })
+            }));
+            claims.push(sharing());
+        }
+        SplitMethod::Exact => claims.extend(record.shares.iter().filter_map(|share| {
+            share.exact.map(|exact| Claim::Share {
+                who: share.member_id,
+                amount: Amount::literal(exact.0),
+            })
+        })),
+    }
+    claims
 }
 
 /// The trips `chat` can switch to: its own, and in a private chat, those
@@ -694,12 +697,17 @@ fn entry_data(trip: &Trip, draft: &Draft, checked: &Checked) -> EntryData {
         rate_source: checked.rate_source,
         base_total: checked.base_total.amount(),
         spent_on: checked.spent_on,
-        split_method: match draft.split {
-            Split::Equal { .. } => SplitMethod::Equal,
-            Split::Shares { .. } => SplitMethod::Shares,
-            Split::Exact { .. } => SplitMethod::Exact,
+        split_method: match checked.lines.as_slice() {
+            [
+                Line::Remainder {
+                    weighted: false, ..
+                },
+            ] => SplitMethod::Equal,
+            [Line::Remainder { weighted: true, .. }] => SplitMethod::Shares,
+            _ => SplitMethod::Exact,
         },
         origin: draft.origin,
+        claims_json: serde_json::to_string(&draft.claims).ok(),
         payers: checked
             .payers
             .iter()
@@ -714,8 +722,8 @@ fn entry_data(trip: &Trip, draft: &Draft, checked: &Checked) -> EntryData {
             .iter()
             .map(|share| Share {
                 member_id: share.member,
-                weight: share.weight,
-                exact: share.exact.map(Money::amount),
+                weight: None,
+                exact: Some(share.amount.amount()),
                 base_amount: share.base.amount(),
             })
             .collect(),
@@ -865,7 +873,7 @@ mod tests {
         let db = memory_db().await;
         let trip = goa(&db).await;
         let ids = trip.member_ids();
-        let draft = Draft::expense("dinner", inr(), dec!(300), ids[0], ids.clone());
+        let draft = Draft::expense("dinner", inr(), dec!(300), ids[0]);
         let stored = save_draft(&db, &trip, ChatId(-100), ANN, &draft)
             .await
             .unwrap();
@@ -906,7 +914,7 @@ mod tests {
             &trip,
             ChatId(-100),
             ANN,
-            &Draft::expense("taxi", usd, dec!(10), ids[0], ids.clone()),
+            &Draft::expense("taxi", usd, dec!(10), ids[0]),
         )
         .await
         .unwrap();
@@ -942,7 +950,7 @@ mod tests {
         let db = memory_db().await;
         let trip = goa(&db).await;
         let ids = trip.member_ids();
-        let draft = Draft::expense("snacks", inr(), dec!(50), ids[0], ids.clone());
+        let draft = Draft::expense("snacks", inr(), dec!(50), ids[0]);
         assert!(matches!(
             save_draft(&db, &trip, ChatId(-100), UserId(99), &draft).await,
             Err(TripsError::NotAMember(_))
@@ -992,19 +1000,11 @@ mod tests {
         trips::set_rate(&db, trip.trip.id, "USD", dec!(80))
             .await
             .unwrap();
-        let mut draft = Draft::expense("taxi", usd, dec!(10), ids[0], ids.clone());
-        draft.split = Split::Shares {
-            weights: vec![
-                Part {
-                    member: ids[0],
-                    amount: dec!(2),
-                },
-                Part {
-                    member: ids[1],
-                    amount: dec!(1),
-                },
-            ],
-        };
+        let mut draft = Draft::expense("taxi", usd, dec!(10), ids[0]);
+        crate::modules::trips::claims::set_weights(
+            &mut draft.claims,
+            &[(ids[0], dec!(2)), (ids[1], dec!(1))],
+        );
         let entry = log(&db, &trip, ANN, &draft).await;
         // The trip's rate changes after the entry was logged.
         trips::set_rate(&db, trip.trip.id, "USD", dec!(90))
@@ -1019,7 +1019,7 @@ mod tests {
         let mut stored = edit_entry(&db, &trip, entry, ChatId(-100), ANN)
             .await
             .unwrap();
-        assert_eq!(stored.draft.split, draft.split);
+        assert_eq!(stored.draft.claims, draft.claims);
         assert_eq!(stored.draft.rate_source, Some(RateSource::Trip));
         stored.draft.description = "airport taxi".into();
         let (edited, checked) = confirm_draft(&db, None, &stored, ANN, today())
@@ -1043,7 +1043,7 @@ mod tests {
             &db,
             &trip,
             BOB,
-            &Draft::expense("snacks", inr(), dec!(90), ids[1], ids.clone()),
+            &Draft::expense("snacks", inr(), dec!(90), ids[1]),
         )
         .await;
         let carl = join(&db, &trip, UserId(3), "Carl").await.unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
             &db,
             &trip,
             ANN,
-            &Draft::expense("dinner", inr(), dec!(300), ids[0], ids.clone()),
+            &Draft::expense("dinner", inr(), dec!(300), ids[0]),
         )
         .await;
         let owed = balances(&trip.trip, &entries(&db, &trip.trip).await.unwrap())
@@ -1143,7 +1143,7 @@ mod tests {
             ..FixedRates::default()
         };
         let rates = Rates::new(Arc::new(source) as Arc<dyn Source>);
-        let mut draft = Draft::expense("taxi", usd, dec!(10), ids[0], ids.clone());
+        let mut draft = Draft::expense("taxi", usd, dec!(10), ids[0]);
         // Tomorrow has no rate yet: today's is used.
         draft.date = DateSpec::On(today().succ_opt().unwrap());
 
