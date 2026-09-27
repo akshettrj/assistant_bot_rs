@@ -7,7 +7,7 @@ use std::sync::Arc;
 use teloxide::{
     net::Download,
     prelude::*,
-    types::{FileId, Me, MessageId, User},
+    types::{Document, ExternalReplyInfoKind, FileId, Me, MessageId, MessageKind, PhotoSize, User},
     utils::html::escape,
 };
 
@@ -22,13 +22,15 @@ use crate::{
             TripsState,
             extract::{self, Reading, Rejection, Sources},
             model, service,
-            service::{StoredDraft, TripsError},
+            service::{StoredDraft, TripView, TripsError},
         },
     },
 };
 
 pub const AI_USAGE: &str = "/ai <what you spent, in plain words>\ne.g. /ai dinner 2400 split with \
-                            Bob\n/ai Bob paid 1,000 and I paid 1,400 for the hotel yesterday";
+                            Bob\n/ai Bob paid 1,000 and I paid 1,400 for the hotel yesterday\nOr \
+                            send a receipt's photo with /ai as its caption, or reply to one with \
+                            /ai";
 
 /// The text after the `ai_keyword`, when `msg` starts with it and its sender
 /// may use the AI: the message is then for the AI to read.
@@ -38,7 +40,11 @@ pub fn after_keyword(msg: Message, me: Me, ctx: Arc<AppContext>) -> Option<Strin
         return None;
     }
     let keyword = current_settings(&ctx).ai_keyword?;
-    let rest = strip_keyword(msg.text()?, &keyword)?;
+    let text = msg.text()?;
+    // The keyword alone is enough in reply to an image.
+    let rest = strip_keyword(text, &keyword).or_else(|| {
+        (text.trim().eq_ignore_ascii_case(&keyword) && replied_photo(&msg).is_some()).then_some("")
+    })?;
     ai::may_use(&ctx.settings.current(), user.id).then(|| rest.to_string())
 }
 
@@ -85,7 +91,12 @@ pub struct Photo {
 
 /// The image in `msg`, if there is one.
 fn photo_of(msg: &Message) -> Option<Photo> {
-    if let Some(sizes) = msg.photo() {
+    image(msg.photo(), msg.document())
+}
+
+/// The image of a message with these `sizes` of a photo, or this `document`.
+fn image(sizes: Option<&[PhotoSize]>, document: Option<&Document>) -> Option<Photo> {
+    if let Some(sizes) = sizes {
         // The largest size comes last.
         let largest = sizes.last()?;
         return Some(Photo {
@@ -94,7 +105,7 @@ fn photo_of(msg: &Message) -> Option<Photo> {
             size: largest.file.size,
         });
     }
-    let document = msg.document()?;
+    let document = document?;
     let media_type = document.mime_type.as_ref()?.essence_str().to_string();
     matches!(
         media_type.as_str(),
@@ -105,6 +116,71 @@ fn photo_of(msg: &Message) -> Option<Photo> {
         media_type,
         size: document.file.size,
     })
+}
+
+/// The caption of an image someone replied to, and who wrote it.
+#[derive(Clone, Debug)]
+struct Caption {
+    author: Option<User>,
+    text: String,
+}
+
+/// The image `msg` replies to, here (with its caption) or, quoted, in another
+/// chat or topic.
+fn replied_photo(msg: &Message) -> Option<(Photo, Option<Caption>)> {
+    if let Some(replied) = msg.reply_to_message()
+        && let Some(photo) = photo_of(replied)
+    {
+        let caption = replied
+            .caption()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| Caption {
+                author: replied.from.clone(),
+                text: text.trim().to_string(),
+            });
+        return Some((photo, caption));
+    }
+    let MessageKind::Common(common) = &msg.kind else {
+        return None;
+    };
+    let photo = match &common.external_reply.as_ref()?.kind {
+        ExternalReplyInfoKind::Photo(sizes) => image(Some(sizes), None),
+        ExternalReplyInfoKind::Document(document) => image(None, Some(document)),
+        _ => None,
+    }?;
+    Some((photo, None))
+}
+
+/// What the AI reads: `text`, and the caption of the image it replies to,
+/// written `by` someone whose "I" isn't the sender's.
+fn said(text: &str, caption: Option<(&str, Option<&str>)>) -> String {
+    let message = if text.is_empty() {
+        "(no message: read the image)"
+    } else {
+        text
+    };
+    match caption {
+        None => message.to_string(),
+        Some((caption, None)) => {
+            format!("{message}\n\nThe image's caption, also by the sender: {caption}")
+        }
+        Some((caption, Some(by))) => format!(
+            "{message}\n\nThe image's caption, written by {by} (\"I\" there is {by}, not the \
+             sender): {caption}"
+        ),
+    }
+}
+
+/// Who wrote `caption`, unless the `sender` did: their name on the trip.
+fn caption_author(caption: &Caption, trip: &TripView, sender: &User) -> Option<String> {
+    match &caption.author {
+        Some(author) if author.id == sender.id => None,
+        Some(author) => Some(
+            trip.member_of(author.id)
+                .map_or_else(|| author.first_name.clone(), |member| member.name.clone()),
+        ),
+        None => Some("someone else".to_string()),
+    }
 }
 
 /// The caption's text after `/ai` (or the keyword), when `msg` is an image
@@ -222,7 +298,10 @@ pub async fn read(
     {
         return correct(bot, ctx, state, msg, user, stored, card.id, text).await;
     }
-    let photo = photo.or_else(|| replied.and_then(photo_of));
+    let (photo, caption) = match photo {
+        Some(photo) => (Some(photo), None),
+        None => replied_photo(msg).map_or((None, None), |(photo, caption)| (Some(photo), caption)),
+    };
     if text.is_empty() && photo.is_none() {
         return reply(bot, msg, escape(AI_USAGE)).await;
     }
@@ -249,17 +328,23 @@ pub async fn read(
         None => Vec::new(),
     };
     let categories = model::categories(&current_settings(ctx));
+    let by = caption
+        .as_ref()
+        .map(|caption| caption_author(caption, &trip, user));
+    let said = said(
+        text,
+        caption
+            .as_ref()
+            .zip(by.as_ref())
+            .map(|(caption, by)| (caption.text.as_str(), by.as_deref())),
+    );
     let request = ai::Request {
         system: if images.is_empty() {
             extract::instructions(&trip, &sender, &categories)
         } else {
             extract::photo_instructions(&trip, &sender, &categories)
         },
-        text: if text.is_empty() {
-            "(no message: read the image)".to_string()
-        } else {
-            text.to_string()
-        },
+        text: said.clone(),
         schema: extract::schema(&categories),
         model: ctx.settings.current().config.ai.model.clone(),
         images,
@@ -267,9 +352,9 @@ pub async fn read(
     let drafts = match ai::extract::<Reading>(llm.as_ref(), &request).await {
         Ok(reading) => {
             // Numbers may come from the image, as the AI transcribed it, only
-            // when there was one.
+            // when there was one; and from its caption.
             let sources = Sources {
-                message: text,
+                message: &said,
                 card: None,
                 photo: reading.transcript.as_deref().filter(|_| photo.is_some()),
             };
@@ -422,6 +507,77 @@ mod tests {
         assert_eq!(strip("/ai@otherbot split"), None);
         assert_eq!(strip("/aid 20"), None);
         assert_eq!(strip("lunch"), None);
+    }
+
+    fn message(json: serde_json::Value) -> Message {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn user(id: u64, name: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "is_bot": false, "first_name": name})
+    }
+
+    fn sizes() -> serde_json::Value {
+        let size = |id, width| {
+            serde_json::json!({
+                "file_id": id, "file_unique_id": id, "width": width, "height": width,
+                "file_size": 1000
+            })
+        };
+        serde_json::json!([size("small", 90), size("large", 1280)])
+    }
+
+    #[test]
+    fn replies_read_the_image_they_reply_to_with_its_caption() {
+        let chat = serde_json::json!({"id": -100, "type": "group", "title": "Goa"});
+        let reply = message(serde_json::json!({
+            "message_id": 2, "date": 0, "chat": chat, "from": user(1, "Ann"),
+            "text": "/ai split equally",
+            "reply_to_message": {
+                "message_id": 1, "date": 0, "chat": chat, "from": user(2, "Bob"),
+                "photo": sizes(), "caption": " Dinner, I paid 2400 "
+            }
+        }));
+        let (photo, caption) = replied_photo(&reply).unwrap();
+        assert_eq!(photo.file.0, "large");
+        let caption = caption.unwrap();
+        assert_eq!(caption.text, "Dinner, I paid 2400");
+        assert_eq!(caption.author.unwrap().first_name, "Bob");
+
+        // A photo quoted from another chat has no caption to read.
+        let quoted = message(serde_json::json!({
+            "message_id": 3, "date": 0, "chat": chat, "from": user(1, "Ann"),
+            "text": "/ai I paid",
+            "external_reply": {
+                "origin": {"type": "user", "date": 0, "sender_user": user(2, "Bob")},
+                "chat": {"id": -200, "type": "supergroup", "title": "Receipts"},
+                "message_id": 7,
+                "photo": sizes()
+            }
+        }));
+        let (photo, caption) = replied_photo(&quoted).unwrap();
+        assert_eq!(photo.file.0, "large");
+        assert!(caption.is_none());
+
+        let text = message(serde_json::json!({
+            "message_id": 4, "date": 0, "chat": chat, "from": user(1, "Ann"),
+            "text": "/ai", "reply_to_message": {
+                "message_id": 1, "date": 0, "chat": chat, "from": user(2, "Bob"), "text": "hi"
+            }
+        }));
+        assert!(replied_photo(&text).is_none());
+    }
+
+    #[test]
+    fn a_caption_by_someone_else_is_theirs() {
+        assert_eq!(said("I paid", None), "I paid");
+        assert_eq!(
+            said("", Some(("dinner 2400", None))),
+            "(no message: read the image)\n\nThe image's caption, also by the sender: dinner 2400"
+        );
+        let said = said("split equally", Some(("I paid 2400", Some("Bob"))));
+        assert!(said.starts_with("split equally\n\n"));
+        assert!(said.ends_with("written by Bob (\"I\" there is Bob, not the sender): I paid 2400"));
     }
 
     #[test]

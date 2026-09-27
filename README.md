@@ -349,10 +349,12 @@ conversion is computed by the bot.
 
 Receipts and bills work too: send the photo (or an image file, up to 5 MB)
 with `/ai` as its caption, e.g. `/ai I paid, the wine was Bob's`, or reply to
-a photo with `/ai …`. The AI first writes out everything printed on it, then
-reads the items, the total and any tax or service lines as claims; its numbers
-must come from that transcript or your caption, and the bot checks the items
-against the printed total.
+anyone's photo (even one quoted from another chat) with `/ai`, `/ai …` or the
+keyword. A replied photo's caption is read too, as its author's words ("I paid
+2400" in Bob's caption means Bob paid). The AI first writes out everything
+printed on the image, then reads the items, the total and any tax or service
+lines as claims; its numbers must come from that transcript or the captions,
+and the bot checks the items against the printed total.
 
 Your name on a trip starts as your Telegram first name: `/trip myname Alex`
 changes it, and `/trip nick Lex` adds another name you go by, so that the AI
