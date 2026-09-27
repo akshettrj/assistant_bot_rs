@@ -126,6 +126,9 @@ notify_home_chat = true
 # (from frankfurter.dev) when the trip has no fixed rate for the currency.
 # Fixed rates are set from the /trip panel.
 auto_rates = true
+# Runtime. Whether the AI (see [ai]) reads expenses from plain messages: in a
+# private chat, or mentioning or replying to the bot in a group.
+ai_messages = true
 
 # Runtime. Extra expense categories besides food, transport, stay, activities,
 # shopping, health and other: an id (for `/spent 500 visa fee #visa`) and a

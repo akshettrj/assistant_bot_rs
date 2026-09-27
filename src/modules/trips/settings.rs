@@ -25,6 +25,10 @@ pub struct TripsSettings {
     /// fixed one.
     #[serde(deserialize_with = "yes_or_no")]
     pub auto_rates: bool,
+    /// Whether the AI reads expenses from plain messages (in private, or
+    /// mentioning or replying to the bot in groups), when `[ai]` is set up.
+    #[serde(deserialize_with = "yes_or_no")]
+    pub ai_messages: bool,
 }
 
 impl Default for TripsSettings {
@@ -34,6 +38,7 @@ impl Default for TripsSettings {
             notify_home_chat: true,
             categories: BTreeMap::new(),
             auto_rates: true,
+            ai_messages: true,
         }
     }
 }
@@ -65,6 +70,17 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         "Whether foreign expenses use the day's ECB rate when the trip has no fixed rate",
     )
     .titled("Automatic exchange rates")
+    .kind(Kind::OneOf {
+        choices: Choices::Fixed(YES_OR_NO),
+        custom: false,
+        optional: false,
+    }),
+    RuntimeSetting::new(
+        "ai_messages",
+        "Whether the AI reads expenses from plain messages: in private, or mentioning or replying \
+         to the bot in groups",
+    )
+    .titled("Read messages with AI")
     .kind(Kind::OneOf {
         choices: Choices::Fixed(YES_OR_NO),
         custom: false,

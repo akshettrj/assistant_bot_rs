@@ -2,6 +2,7 @@
 //! cards ([`drafts`]) and the trip's panel ([`panel`]).
 
 pub mod drafts;
+pub mod messages;
 pub mod panel;
 
 use std::sync::Arc;

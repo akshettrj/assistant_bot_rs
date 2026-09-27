@@ -98,6 +98,21 @@ pub async fn send_card(
     Ok(())
 }
 
+/// Shows a new draft on a card in place of `message` (e.g. a placeholder).
+pub async fn show_card(
+    bot: &AssistantBot,
+    ctx: &AppContext,
+    state: &TripsState,
+    trip: &TripView,
+    stored: &StoredDraft,
+    message: &Message,
+) -> HandlerResult {
+    let (text, keyboard) = render(ctx, state, trip, stored, View::Main).await?;
+    edit(bot, message.chat.id, message.id, text, Some(keyboard)).await?;
+    service::set_card(&ctx.db, stored.id, message.id).await?;
+    Ok(())
+}
+
 /// The card of `stored` showing `view`.
 async fn render(
     ctx: &AppContext,

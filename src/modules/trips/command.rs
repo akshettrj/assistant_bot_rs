@@ -293,7 +293,7 @@ pub fn apply_answer(
 }
 
 /// A description's length limit, to keep cards and summaries short.
-const MAX_DESCRIPTION: usize = 100;
+pub const MAX_DESCRIPTION: usize = 100;
 
 /// Changes the draft's currency; a rate given for the previous one no longer
 /// applies.

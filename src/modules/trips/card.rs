@@ -18,7 +18,7 @@ use super::{
     settings::TripsSettings,
     text,
 };
-use crate::db::entities::entries::{EntryKind, RateSource};
+use crate::db::entities::entries::{EntryKind, Origin, RateSource};
 
 pub const CALLBACK_PREFIX: &str = "trip:";
 const DRAFT_PREFIX: &str = "trip:d:";
@@ -207,6 +207,9 @@ pub fn text(
                 escape(&problem.describe(|member| trip.name(member)))
             ));
         }
+    }
+    if draft.origin != Origin::Manual && draft.replaces.is_none() {
+        lines.push("🤖 Read by the AI: check it before saving.".to_string());
     }
     lines.join("\n")
 }

@@ -13,6 +13,7 @@
 pub mod card;
 pub mod command;
 pub mod draft;
+pub mod extract;
 pub mod ledger;
 pub mod model;
 pub mod money;
@@ -152,6 +153,11 @@ impl Module for TripsModule {
                 Update::filter_message()
                     .filter_command::<Command>()
                     .endpoint(telegram::handle_command),
+            )
+            .branch(
+                Update::filter_message()
+                    .filter(telegram::messages::is_for_ai)
+                    .endpoint(telegram::messages::read_message),
             )
             .branch(
                 Update::filter_callback_query()
