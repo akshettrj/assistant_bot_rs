@@ -285,24 +285,50 @@ lights can be added without touching the commands or the panel.
 src/
 ├── main.rs, cli.rs, app.rs   entrypoint, argument parsing, startup
 ├── config/                   typed config, TOML + env loading, validation
-├── settings/                 runtime overrides: keys, module settings, store,
-│                             operations shared by /config and the CLI
+├── settings/                 the assistant's schema for botconf: core keys,
+│                             module sections, access rules
 ├── telemetry.rs              tracing subscriber with a reloadable filter
 ├── scheduling.rs             times of day, weekdays and recurrences
 ├── context.rs                AppContext: state shared with every handler
 ├── prompts.rs                questions answered by the user's next message
-├── directory.rs              names for user and chat ids
+│                             (from botconf-telegram)
+├── directory.rs              names for user and chat ids, for the panel
 ├── access.rs                 who may use which module
 ├── bot/                      Telegram client, handler tree, error reporting,
 │                             command menus
 ├── modules/                  Module trait, registry, built-in modules
 │   ├── general.rs            /start, /help, /id
 │   ├── lights/               /light: Tuya bulbs over the LAN, schedules
-│   └── settings/             /config: the settings panel and text commands
+│   └── settings.rs           /config: mounts the panel with the bot's hooks
 └── db/                       connection, entities, repositories
+crates/
+├── botconf/                  reusable runtime settings: layering, schema,
+│                             kinds, sections, storage (SeaORM), CLI
+└── botconf-telegram/         reusable Telegram settings panel and prompts;
+                              examples/panel_bot.rs is a minimal bot using it
 migration/                    SeaORM migrations (workspace member)
 nix/build.nix                 crane build and checks
 ```
+
+The settings machinery is split into two crates that don't depend on this
+bot, so that other bots can reuse it:
+
+- **`botconf`** keeps typed settings editable at runtime. A program describes
+  its configuration with a `Schema`: the typed config, what's derived from it
+  (and validated), the keys editable at runtime with their `Kind`, typed
+  sections, lints and change hooks. The overrides live in a `Storage`: in
+  memory, or in a SQL table with the `sea-orm` feature. The `cli` feature adds
+  a clap `settings` subcommand.
+- **`botconf-telegram`** is the Telegram panel for any `botconf` schema and
+  any teloxide bot type. A bot builds a `SettingsPanel` with its hooks (names
+  for ids, what to do after a change, a note per section), adds it to the
+  dispatcher's dependencies, mounts `SettingsPanel::handler()`, and calls
+  `run_command()` from its settings command. Its prompts are shared with the
+  rest of the bot.
+
+Their API docs (`cargo doc -p botconf -p botconf-telegram --open`) have the
+details, and `cargo run -p botconf-telegram --example panel_bot` runs the
+example bot (with `TELOXIDE_TOKEN` and `EXAMPLE_OWNER_ID` set).
 
 When an update arrives:
 
@@ -408,8 +434,10 @@ never see a half-applied change.
      configuration, and `modules::settings::settings_button(ID)` links a
      module's own panel to its settings.
 
-   Read them with `ctx.settings.current().module_settings::<T>(ID)` for each
-   update rather than caching them, so runtime changes are picked up.
+   Read them with `ctx.settings.current().module_settings::<T>(ID)` (from
+   `settings::SnapshotExt`) for each update rather than caching them, so
+   runtime changes are picked up. The kinds and choices come from
+   `crate::settings::kind` (the `botconf` crate).
 4. Grant access with `/config add telegram.allowed_users.ping <user id>`, or in
    the config file.
 
