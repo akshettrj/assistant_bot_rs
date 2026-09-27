@@ -11,10 +11,11 @@ use super::{
     service::TripView,
 };
 
-pub const TRIP_USAGE: &str = "/trip — the trip of this chat\n/trip new <name> [currency] — start \
-                              a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this \
-                              chat's trip\n/trip add <name> — add someone without Telegram (the \
-                              trip's creator)";
+pub const TRIP_USAGE: &str =
+    "/trip — this chat's trip: balances, entries, people, rates\n/trip new <name> [currency] — \
+     start a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this chat's trip\n/trip \
+     add <name> — add someone without Telegram (the trip's creator)\n/spent 2400 dinner — log an \
+     expense · /balance — who owes whom · /settle — settle up";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
@@ -163,6 +164,54 @@ pub fn parse_money(word: &str) -> Result<(Decimal, Option<Currency>), String> {
     Ok((parse_amount(word)?, None))
 }
 
+pub const SETTLE_USAGE: &str = "/settle — who owes whom, with buttons to record payments\n/settle \
+                                <amount> [currency] to <name> — log that you paid someone back, \
+                                e.g. /settle 500 to Ann";
+
+/// `/settle 500 to Ann`: a payment the sender made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settle {
+    pub amount: Decimal,
+    pub currency: Option<Currency>,
+    pub to: String,
+}
+
+/// `None` for a bare `/settle`.
+pub fn parse_settle(args: &str) -> Result<Option<Settle>, String> {
+    let words: Vec<&str> = args.split_whitespace().collect();
+    if words.is_empty() {
+        return Ok(None);
+    }
+    let usage = || "send e.g. /settle 500 to Ann".to_string();
+    let to = words
+        .iter()
+        .position(|word| word.eq_ignore_ascii_case("to"))
+        .ok_or_else(usage)?;
+    let (amount, name) = (&words[..to], &words[to + 1..]);
+    if amount.is_empty() || name.is_empty() {
+        return Err(usage());
+    }
+    let (amount, currency) = parse_money_text(&amount.join(" "))?;
+    Ok(Some(Settle {
+        amount,
+        currency,
+        to: name.join(" "),
+    }))
+}
+
+/// A fixed rate: `USD 83.25` or `83.25 USD`.
+pub fn parse_rate(text: &str) -> Result<(Currency, Rate), String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let (code, value) = match words.as_slice() {
+        [first, second] if Currency::from_code(first).is_ok() => (*first, *second),
+        [first, second] => (*second, *first),
+        _ => return Err("send a currency and a rate, e.g. USD 83.25".to_string()),
+    };
+    let currency = Currency::from_code(code).map_err(|error| error.to_string())?;
+    let rate = Rate::new(parse_amount(value)?).map_err(|error| error.to_string())?;
+    Ok((currency, rate))
+}
+
 /// An amount with an optional currency, attached or as a second word: `2400`,
 /// `30usd`, `30 USD`.
 pub fn parse_money_text(text: &str) -> Result<(Decimal, Option<Currency>), String> {
@@ -231,6 +280,7 @@ pub fn apply_answer(
         Field::Rate => {
             let rate = Rate::new(parse_amount(text)?).map_err(|error| error.to_string())?;
             draft.rate = Some(rate);
+            draft.rate_source = None;
         }
     }
     Ok(())
@@ -245,6 +295,7 @@ pub fn set_currency(draft: &mut Draft, currency: Currency) {
     if draft.currency != currency {
         draft.currency = currency;
         draft.rate = None;
+        draft.rate_source = None;
     }
 }
 
@@ -511,6 +562,36 @@ mod tests {
         assert!(error.contains("who is Zed?"), "{error}");
         assert!(parse_parts("Ann", &goa()).is_err());
         assert!(parse_parts(" , ", &goa()).is_err());
+    }
+
+    #[test]
+    fn settle_names_who_was_paid() {
+        assert_eq!(parse_settle("  "), Ok(None));
+        assert_eq!(
+            parse_settle("500 to Ann Lee"),
+            Ok(Some(Settle {
+                amount: dec!(500),
+                currency: None,
+                to: "Ann Lee".into(),
+            }))
+        );
+        assert_eq!(
+            parse_settle("20 usd TO bob").unwrap().unwrap().currency,
+            Some(currency("USD"))
+        );
+        assert!(parse_settle("500 Ann").is_err());
+        assert!(parse_settle("to Ann").is_err());
+        assert!(parse_settle("500 to").is_err());
+    }
+
+    #[test]
+    fn rates_in_either_order() {
+        let usd = (currency("USD"), Rate::new(dec!(83.25)).unwrap());
+        assert_eq!(parse_rate("USD 83.25"), Ok(usd));
+        assert_eq!(parse_rate("83.25 usd"), Ok(usd));
+        assert!(parse_rate("USD").is_err());
+        assert!(parse_rate("USD 0").is_err());
+        assert!(parse_rate("XYZ 2").is_err());
     }
 
     #[test]

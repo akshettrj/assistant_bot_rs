@@ -7,7 +7,7 @@ use sea_orm::{DatabaseConnection, DbErr, TransactionTrait};
 use teloxide::types::{ChatId, MessageId, UserId};
 
 use super::{
-    draft::{self, Checked, Context, Draft, MemberId, Problem, Split},
+    draft::{self, Checked, Context, DateSpec, Draft, MemberId, Part, Problem, Split},
     ledger::{Balances, LedgerError},
     model::{Member, Trip},
     money::{Currency, Money, Rate},
@@ -43,6 +43,10 @@ pub enum TripsError {
     NameTaken(String),
     #[error("this draft has expired: start again")]
     DraftExpired,
+    #[error("that entry is no longer on the trip")]
+    EntryGone,
+    #[error("{0}")]
+    Invalid(String),
     #[error("the draft isn't ready yet")]
     Problems(Vec<Problem>),
     #[error("the stored data is invalid: {0}")]
@@ -367,8 +371,8 @@ pub async fn check_draft(
     Ok(draft::check(draft, &context))
 }
 
-/// Saves the draft as an entry, if `user`, its author, may; returns the
-/// entry's id and amounts.
+/// Saves the draft as an entry (or over the entry it edits), if `user`, its
+/// author, may; returns the entry's id and amounts.
 pub async fn confirm_draft(
     db: &DatabaseConnection,
     stored: &StoredDraft,
@@ -382,20 +386,280 @@ pub async fn confirm_draft(
             .map_or("its author".to_string(), |member| member.name.clone());
         return Err(TripsError::NotAllowed(author));
     }
-    trip.require_member(user)?;
-    if trip.trip.is_ended() && stored.draft.kind == EntryKind::Expense {
-        return Err(TripsError::Ended(trip.trip.name));
-    }
-
-    let checked = check_draft(db, &trip, &stored.draft, today)
-        .await?
-        .map_err(TripsError::Problems)?;
-    let data = entry_data(&trip.trip, &stored.draft, &checked);
+    let checked = check_for(db, &trip, &stored.draft, user, today).await?;
     let txn = db.begin().await?;
-    let id = entries::insert(&txn, &data, user).await?;
+    let id = write_entry(&txn, &trip.trip, &stored.draft, &checked, user).await?;
     drafts::delete(&txn, stored.id).await?;
     txn.commit().await?;
     Ok((id, checked))
+}
+
+/// Checks that `user` may record `draft` on the trip, and its amounts.
+async fn check_for(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    draft: &Draft,
+    user: UserId,
+    today: NaiveDate,
+) -> Result<Checked> {
+    trip.require_member(user)?;
+    if trip.trip.is_ended() && draft.kind == EntryKind::Expense {
+        return Err(TripsError::Ended(trip.trip.name.clone()));
+    }
+    if let Some(entry) = draft.replaces {
+        let record = find_entry(db, &trip.trip, entry).await?;
+        require_author_or_creator(trip, &record, user)?;
+    }
+    check_draft(db, trip, draft, today)
+        .await?
+        .map_err(TripsError::Problems)
+}
+
+async fn write_entry<C>(
+    db: &C,
+    trip: &Trip,
+    draft: &Draft,
+    checked: &Checked,
+    user: UserId,
+) -> Result<i32>
+where
+    C: sea_orm::ConnectionTrait + TransactionTrait,
+{
+    let data = entry_data(trip, draft, checked);
+    match draft.replaces {
+        Some(entry) => {
+            entries::replace(db, entry, &data, user).await?;
+            Ok(entry)
+        }
+        None => Ok(entries::insert(db, &data, user).await?),
+    }
+}
+
+/// Records that `from` paid `amount` (in the trip's currency) back to `to`.
+pub async fn settle(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    from: MemberId,
+    to: MemberId,
+    amount: Money,
+    today: NaiveDate,
+) -> Result<i32> {
+    let draft = Draft::settlement(amount.currency(), amount.amount(), from, to);
+    let checked = check_for(db, trip, &draft, by, today).await?;
+    write_entry(db, &trip.trip, &draft, &checked, by).await
+}
+
+/// An entry of the trip, deleted or not.
+pub async fn find_entry(db: &DatabaseConnection, trip: &Trip, id: i32) -> Result<EntryRecord> {
+    entries::find(db, id)
+        .await?
+        .filter(|record| record.entry.trip_id == trip.id)
+        .ok_or(TripsError::EntryGone)
+}
+
+/// Entries are changed by whoever logged them, or by the trip's creator.
+fn require_author_or_creator(trip: &TripView, record: &EntryRecord, user: UserId) -> Result<()> {
+    let author = UserId(record.entry.created_by.unsigned_abs());
+    if user == author || user == trip.trip.created_by {
+        return Ok(());
+    }
+    let name = |id: UserId| {
+        trip.member_of(id).map_or_else(
+            || "a former member".to_string(),
+            |member| member.name.clone(),
+        )
+    };
+    Err(TripsError::NotAllowed(format!(
+        "{} or {}",
+        name(author),
+        name(trip.trip.created_by)
+    )))
+}
+
+/// Hides an entry from the ledger.
+pub async fn delete_entry(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    id: i32,
+    by: UserId,
+) -> Result<()> {
+    let record = find_entry(db, &trip.trip, id).await?;
+    require_author_or_creator(trip, &record, by)?;
+    Ok(entries::delete(db, id, by).await?)
+}
+
+/// Brings a deleted entry back.
+pub async fn restore_entry(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    id: i32,
+    by: UserId,
+) -> Result<()> {
+    let record = find_entry(db, &trip.trip, id).await?;
+    require_author_or_creator(trip, &record, by)?;
+    Ok(entries::restore(db, id, by).await?)
+}
+
+/// A draft editing entry `id`, for a card in `chat`.
+pub async fn edit_entry(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    id: i32,
+    chat: ChatId,
+    by: UserId,
+) -> Result<StoredDraft> {
+    let record = find_entry(db, &trip.trip, id).await?;
+    require_author_or_creator(trip, &record, by)?;
+    let draft = draft_of(&record)?;
+    save_draft(db, trip, chat, by, &draft).await
+}
+
+/// The draft an entry was saved from, keeping its frozen rate.
+fn draft_of(record: &EntryRecord) -> Result<Draft> {
+    let entry = &record.entry;
+    let currency = Currency::from_code(&entry.currency)
+        .map_err(|error| TripsError::Corrupt(error.to_string()))?;
+    let parts =
+        |value: fn(&crate::db::entities::entry_shares::Model) -> Option<rust_decimal::Decimal>| {
+            record
+                .shares
+                .iter()
+                .map(|share| {
+                    value(share)
+                        .map(|amount| Part {
+                            member: share.member_id,
+                            amount,
+                        })
+                        .ok_or_else(|| {
+                            TripsError::Corrupt(format!(
+                                "entry {}: a share lacks its input",
+                                entry.id
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+    let split = match entry.split_method {
+        SplitMethod::Equal => Split::Equal {
+            members: record.shares.iter().map(|share| share.member_id).collect(),
+        },
+        SplitMethod::Shares => Split::Shares {
+            weights: parts(|share| share.weight.map(|weight| weight.0))?,
+        },
+        SplitMethod::Exact => Split::Exact {
+            amounts: parts(|share| share.exact.map(|exact| exact.0))?,
+        },
+    };
+    let rate = match entry.rate_source {
+        RateSource::Base => None,
+        _ => Some(Rate::new(entry.rate.0).map_err(|error| TripsError::Corrupt(error.to_string()))?),
+    };
+    Ok(Draft {
+        kind: entry.kind,
+        description: entry.description.clone(),
+        category: entry.category.clone(),
+        currency,
+        payers: record
+            .payers
+            .iter()
+            .map(|payer| Part {
+                member: payer.member_id,
+                amount: payer.amount.0,
+            })
+            .collect(),
+        stated_total: None,
+        split,
+        date: DateSpec::On(entry.spent_on),
+        rate,
+        rate_source: rate.map(|_| entry.rate_source),
+        origin: entry.origin,
+        replaces: Some(entry.id),
+    })
+}
+
+/// The trips `chat` can switch to: its own, and in a private chat, those
+/// `user` is on. Newest first.
+pub async fn switchable(
+    db: &DatabaseConnection,
+    chat: ChatId,
+    private: bool,
+    user: UserId,
+) -> Result<Vec<Trip>> {
+    let mut found = trips::in_chat(db, chat).await?;
+    if private {
+        for trip in trips::of_user(db, user).await? {
+            if !found.iter().any(|known| known.id == trip.id) {
+                found.push(trip);
+            }
+        }
+    }
+    found.sort_by_key(|trip| std::cmp::Reverse(trip.id));
+    found
+        .into_iter()
+        .map(|trip| trip.try_into().map_err(TripsError::Corrupt))
+        .collect()
+}
+
+/// Makes `chat` log to trip `id`: one of the chat's, or in a private chat,
+/// one `user` is on.
+pub async fn use_trip(
+    db: &DatabaseConnection,
+    chat: ChatId,
+    private: bool,
+    user: UserId,
+    id: i32,
+) -> Result<TripView> {
+    let trip = load(db, id).await?;
+    let allowed = trip.trip.home_chat == chat || (private && trip.member_of(user).is_some());
+    if !allowed {
+        return Err(TripsError::NotAMember(trip.trip.name));
+    }
+    trips::set_active(db, chat, id).await?;
+    Ok(trip)
+}
+
+/// Fixes the trip's rate for `currency`.
+pub async fn set_rate(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    currency: Currency,
+    rate: Rate,
+) -> Result<()> {
+    trip.require_member(by)?;
+    if currency == trip.trip.base {
+        return Err(TripsError::Invalid(format!(
+            "{currency} is the trip's own currency"
+        )));
+    }
+    Ok(trips::set_rate(db, trip.trip.id, currency.code(), rate.value()).await?)
+}
+
+pub async fn remove_rate(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    currency: Currency,
+) -> Result<()> {
+    trip.require_member(by)?;
+    Ok(trips::remove_rate(db, trip.trip.id, currency.code()).await?)
+}
+
+/// The trip's fixed rates.
+pub async fn rates(db: &DatabaseConnection, trip: &Trip) -> Result<Vec<(Currency, Rate)>> {
+    trips::rates(db, trip.id)
+        .await?
+        .into_iter()
+        .map(|rate| {
+            let currency = Currency::from_code(&rate.currency);
+            let value = Rate::new(rate.rate.0);
+            match (currency, value) {
+                (Ok(currency), Ok(value)) => Ok((currency, value)),
+                (Err(error), _) | (_, Err(error)) => Err(TripsError::Corrupt(error.to_string())),
+            }
+        })
+        .collect()
 }
 
 fn entry_data(trip: &Trip, draft: &Draft, checked: &Checked) -> EntryData {
@@ -682,5 +946,184 @@ mod tests {
             .await
             .unwrap();
         confirm_draft(&db, &stored, BOB, today()).await.unwrap();
+    }
+
+    /// Logs `draft` by `author` on the trip, returning the entry's id.
+    async fn log(db: &DatabaseConnection, trip: &TripView, author: UserId, draft: &Draft) -> i32 {
+        let stored = save_draft(db, trip, ChatId(-100), author, draft)
+            .await
+            .unwrap();
+        confirm_draft(db, &stored, author, today()).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn editing_an_entry_keeps_its_frozen_rate() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let ids = trip.member_ids();
+        let usd = Currency::from_code("USD").unwrap();
+        trips::set_rate(&db, trip.trip.id, "USD", dec!(80))
+            .await
+            .unwrap();
+        let mut draft = Draft::expense("taxi", usd, dec!(10), ids[0], ids.clone());
+        draft.split = Split::Shares {
+            weights: vec![
+                Part {
+                    member: ids[0],
+                    amount: dec!(2),
+                },
+                Part {
+                    member: ids[1],
+                    amount: dec!(1),
+                },
+            ],
+        };
+        let entry = log(&db, &trip, ANN, &draft).await;
+        // The trip's rate changes after the entry was logged.
+        trips::set_rate(&db, trip.trip.id, "USD", dec!(90))
+            .await
+            .unwrap();
+
+        // Bob neither logged it nor created the trip.
+        assert!(matches!(
+            edit_entry(&db, &trip, entry, ChatId(-100), BOB).await,
+            Err(TripsError::NotAllowed(_))
+        ));
+        let mut stored = edit_entry(&db, &trip, entry, ChatId(-100), ANN)
+            .await
+            .unwrap();
+        assert_eq!(stored.draft.split, draft.split);
+        assert_eq!(stored.draft.rate_source, Some(RateSource::Trip));
+        stored.draft.description = "airport taxi".into();
+        let (edited, checked) = confirm_draft(&db, &stored, ANN, today()).await.unwrap();
+        assert_eq!(edited, entry);
+        assert_eq!(checked.base_total.amount(), dec!(800));
+        assert_eq!(checked.rate_source, RateSource::Trip);
+
+        let records = entries(&db, &trip.trip).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].entry.description, "airport taxi");
+    }
+
+    #[tokio::test]
+    async fn entries_are_deleted_by_their_author_or_the_creator() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let ids = trip.member_ids();
+        let entry = log(
+            &db,
+            &trip,
+            BOB,
+            &Draft::expense("snacks", inr(), dec!(90), ids[1], ids.clone()),
+        )
+        .await;
+        let carl = join(&db, &trip, UserId(3), "Carl").await.unwrap();
+        let trip = load(&db, trip.trip.id).await.unwrap();
+        assert!(carl.user.is_some());
+        assert!(matches!(
+            delete_entry(&db, &trip, entry, UserId(3)).await,
+            Err(TripsError::NotAllowed(_))
+        ));
+        // The creator may.
+        delete_entry(&db, &trip, entry, ANN).await.unwrap();
+        assert!(entries(&db, &trip.trip).await.unwrap().is_empty());
+        restore_entry(&db, &trip, entry, BOB).await.unwrap();
+        assert_eq!(entries(&db, &trip.trip).await.unwrap().len(), 1);
+        assert!(matches!(
+            delete_entry(&db, &trip, 999, ANN).await,
+            Err(TripsError::EntryGone)
+        ));
+    }
+
+    #[tokio::test]
+    async fn settling_up_clears_the_balances() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let ids = trip.member_ids();
+        log(
+            &db,
+            &trip,
+            ANN,
+            &Draft::expense("dinner", inr(), dec!(300), ids[0], ids.clone()),
+        )
+        .await;
+        let owed = balances(&trip.trip, &entries(&db, &trip.trip).await.unwrap())
+            .unwrap()
+            .settle_up();
+        assert_eq!(owed.len(), 2);
+        for transfer in owed {
+            settle(
+                &db,
+                &trip,
+                BOB,
+                transfer.from,
+                transfer.to,
+                transfer.amount,
+                today(),
+            )
+            .await
+            .unwrap();
+        }
+        let records = entries(&db, &trip.trip).await.unwrap();
+        assert!(balances(&trip.trip, &records).unwrap().is_settled());
+        assert_eq!(records[1].entry.kind, EntryKind::Settlement);
+    }
+
+    #[tokio::test]
+    async fn chats_switch_between_their_trips() {
+        let db = memory_db().await;
+        let goa = goa(&db).await;
+        let manali = create_trip(&db, ChatId(-200), BOB, "Bob", "Manali", inr())
+            .await
+            .unwrap();
+        // The group only sees its own trip; Bob's private chat sees both.
+        let names = |trips: Vec<Trip>| trips.into_iter().map(|trip| trip.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(switchable(&db, ChatId(-100), false, BOB).await.unwrap()),
+            ["Goa"]
+        );
+        assert_eq!(
+            names(switchable(&db, ChatId(2), true, BOB).await.unwrap()),
+            ["Manali", "Goa"]
+        );
+
+        use_trip(&db, ChatId(2), true, BOB, goa.trip.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            require_active(&db, ChatId(2)).await.unwrap().trip.name,
+            "Goa"
+        );
+        // Ann isn't on Manali, nor is it the group's.
+        assert!(
+            use_trip(&db, ChatId(1), true, ANN, manali.trip.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            use_trip(&db, ChatId(-100), false, BOB, manali.trip.id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn rates_are_for_foreign_currencies() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let usd = Currency::from_code("USD").unwrap();
+        let rate = Rate::new(dec!(83.5)).unwrap();
+        set_rate(&db, &trip, BOB, usd, rate).await.unwrap();
+        assert_eq!(rates(&db, &trip.trip).await.unwrap(), [(usd, rate)]);
+        assert!(matches!(
+            set_rate(&db, &trip, BOB, inr(), rate).await,
+            Err(TripsError::Invalid(_))
+        ));
+        assert!(matches!(
+            set_rate(&db, &trip, UserId(99), usd, rate).await,
+            Err(TripsError::NotAMember(_))
+        ));
+        remove_rate(&db, &trip, ANN, usd).await.unwrap();
+        assert!(rates(&db, &trip.trip).await.unwrap().is_empty());
     }
 }

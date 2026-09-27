@@ -28,7 +28,14 @@ pub struct Draft {
     pub date: DateSpec,
     /// A rate given for this entry, overriding the trip's and the day's.
     pub rate: Option<Rate>,
+    /// Where `rate` came from, when it was frozen on an entry being edited;
+    /// otherwise it was given for this entry.
+    #[serde(default)]
+    pub rate_source: Option<RateSource>,
     pub origin: Origin,
+    /// The entry this draft edits, if any.
+    #[serde(default)]
+    pub replaces: Option<i32>,
 }
 
 /// A member and an amount (or a weight).
@@ -111,7 +118,9 @@ impl Draft {
             split: Split::Equal { members },
             date: DateSpec::Today,
             rate: None,
+            rate_source: None,
             origin: Origin::Manual,
+            replaces: None,
         }
     }
 
@@ -311,7 +320,7 @@ pub fn check(draft: &Draft, context: &Context<'_>) -> Result<Checked, Vec<Proble
     let (rate, rate_source) = if currency == context.base {
         (Rate::ONE, RateSource::Base)
     } else if let Some(rate) = draft.rate {
-        (rate, RateSource::Manual)
+        (rate, draft.rate_source.unwrap_or(RateSource::Manual))
     } else if let Some(known) = context.known_rate {
         known
     } else {

@@ -235,8 +235,13 @@ fn headline(trip: &TripView, draft: &Draft) -> String {
     } else {
         title
     };
+    let editing = if draft.replaces.is_some() {
+        "✏️ "
+    } else {
+        ""
+    };
     format!(
-        "{icon} {} · {}",
+        "{editing}{icon} {} · {}",
         bold(&escape(title)),
         escape(&trip.trip.name)
     )
@@ -370,7 +375,14 @@ pub fn keyboard(
                 ],
                 vec![
                     button(id, "👛 Paid by", &Action::Show(View::Payers)),
-                    button(id, "➗ Split", &Action::Show(View::Split)),
+                    button(
+                        id,
+                        match draft.kind {
+                            EntryKind::Expense => "➗ Split",
+                            EntryKind::Settlement => "➡️ To",
+                        },
+                        &Action::Show(View::Split),
+                    ),
                     button(id, "💱 Currency", &Action::Show(View::Currency)),
                 ],
             ];
