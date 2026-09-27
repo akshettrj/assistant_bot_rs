@@ -19,6 +19,7 @@ pub mod general;
 pub mod lights;
 mod registry;
 pub mod settings;
+pub mod trips;
 
 use std::sync::Arc;
 

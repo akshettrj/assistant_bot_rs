@@ -64,6 +64,7 @@ figment = { workspace = true }
 futures = { workspace = true }
 humantime = "2.4.0"
 iana-time-zone = "0.1.65"
+rust_decimal = { version = "1.43.0", features = ["macros"] }
 rustuya = "0.3.0"
 sea-orm = { workspace = true }
 serde = { workspace = true }
@@ -77,5 +78,6 @@ url = { version = "2.5.8", features = ["serde"] }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+proptest = "1.11.0"
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
