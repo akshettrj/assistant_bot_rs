@@ -112,7 +112,11 @@ impl ClaudeCli {
             })?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let exchange = async {
-            stdin.write_all(request.text.as_bytes()).await?;
+            // The CLI may exit without reading it (e.g. not logged in): its
+            // output then says why.
+            if let Err(error) = stdin.write_all(request.text.as_bytes()).await {
+                tracing::debug!(%error, "the Claude CLI didn't take the message");
+            }
             drop(stdin);
             child.wait_with_output().await
         };
