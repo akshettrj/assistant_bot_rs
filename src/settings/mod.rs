@@ -194,6 +194,29 @@ pub const CORE_SETTINGS: &[RuntimeSetting] = &[
         custom: true,
         optional: false,
     }),
+    RuntimeSetting::new(
+        "ai.model",
+        "The Claude model reading messages: sonnet, haiku (cheaper), opus, or a full name",
+    )
+    .titled("AI model")
+    .kind(Kind::OneOf {
+        choices: Choices::Fixed(AI_MODELS),
+        custom: true,
+        optional: false,
+    }),
+    RuntimeSetting::new(
+        "ai.users",
+        "Who may use the AI besides the owner and the sudo users (it uses the owner's \
+         subscription)",
+    )
+    .titled("AI users")
+    .kind(Kind::Users),
+];
+
+const AI_MODELS: &[FixedChoice] = &[
+    FixedChoice::new("sonnet", "Sonnet"),
+    FixedChoice::new("haiku", "Haiku"),
+    FixedChoice::new("opus", "Opus"),
 ];
 
 fn module_choices(view: &dyn View, toggleable_only: bool) -> Vec<Choice> {

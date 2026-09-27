@@ -132,3 +132,22 @@ auto_rates = true
 # label with an emoji.
 [modules.trips.categories]
 # visa = "🛂 Visa"
+
+# The AI that reads messages (e.g. "dinner 2400, Ann and I split it" becomes a
+# draft expense to check). It runs the Claude Code CLI (`claude`, which must be
+# installed) with your Claude subscription, without tools, in an empty
+# directory. Without a token, AI features are off.
+[ai]
+# A token from `claude setup-token`, valid a year. Prefer the environment:
+# ASSISTANT_AI__OAUTH_TOKEN=sk-ant-oat01-...
+# oauth_token = ""
+# The `claude` program, if it isn't on the PATH.
+# claude_path = "/home/you/.local/bin/claude"
+# Runtime. sonnet, haiku (cheaper), opus, or a full model name.
+model = "sonnet"
+# Runtime. Who may use it besides the owner and the sudo users: it uses your
+# subscription, which Anthropic's terms intend for your own use.
+users = []
+# Seconds before a request gives up, and at most this many at once.
+timeout_secs = 60
+max_concurrent = 2

@@ -71,6 +71,7 @@ sea-orm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 teloxide = { workspace = true }
+tempfile = "3.27.0"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -80,5 +81,4 @@ url = { version = "2.5.8", features = ["serde"] }
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
 proptest = "1.11.0"
-tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

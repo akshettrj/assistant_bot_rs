@@ -3,7 +3,11 @@ use std::sync::Arc;
 use sea_orm::DatabaseConnection;
 
 use crate::{
-    directory::Directory, modules::ModuleRegistry, prompts::Prompts, settings::SettingsStore,
+    ai::{self, Llm},
+    directory::Directory,
+    modules::ModuleRegistry,
+    prompts::Prompts,
+    settings::SettingsStore,
 };
 
 /// The shared state every handler can request (as `Arc<AppContext>`).
@@ -17,6 +21,9 @@ pub struct AppContext {
     pub prompts: Arc<Prompts>,
     /// Names for user and chat ids.
     pub directory: Directory,
+    /// The language model, when `[ai]` configures one. Check
+    /// [`ai::may_use`] before using it for someone.
+    pub ai: Option<Arc<dyn Llm>>,
 }
 
 impl AppContext {
@@ -25,12 +32,24 @@ impl AppContext {
         db: DatabaseConnection,
         modules: Arc<ModuleRegistry>,
     ) -> Arc<Self> {
+        let ai = ai::from_config(&settings.current().config.ai);
+        Self::with_ai(settings, db, modules, ai)
+    }
+
+    /// With the language model `ai` rather than the configured one.
+    pub fn with_ai(
+        settings: SettingsStore,
+        db: DatabaseConnection,
+        modules: Arc<ModuleRegistry>,
+        ai: Option<Arc<dyn Llm>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             settings: Arc::new(settings),
             db,
             modules,
             prompts: Arc::default(),
             directory: Directory::default(),
+            ai,
         })
     }
 }

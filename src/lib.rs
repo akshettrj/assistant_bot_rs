@@ -10,6 +10,7 @@
 //! - [`db`]: persistence (SeaORM entities and repositories).
 
 pub mod access;
+pub mod ai;
 pub mod app;
 pub mod bot;
 pub mod cli;

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{DatabaseConfig, LoggingConfig, ModulesConfig, TelegramConfig};
+use crate::config::{AiConfig, DatabaseConfig, LoggingConfig, ModulesConfig, TelegramConfig};
 
 /// The complete configuration of the assistant.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -13,6 +13,10 @@ pub struct AssistantConfig {
     /// the system's.
     #[serde(default)]
     pub timezone: Option<String>,
+
+    /// The language model features use to read messages.
+    #[serde(default)]
+    pub ai: AiConfig,
 
     /// The database related settings.
     #[serde(default)]

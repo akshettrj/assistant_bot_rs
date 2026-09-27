@@ -90,6 +90,8 @@ impl AssistantConfig {
             super::top_level::validate_timezone(timezone).map_err(ConfigError::Invalid)?;
         }
 
+        self.ai.validate().map_err(ConfigError::Invalid)?;
+
         if let Err(error) = EnvFilter::try_new(&self.logging.filter) {
             return Err(ConfigError::Invalid(format!(
                 "`logging.filter` is not a valid filter: {error}"

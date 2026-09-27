@@ -1,6 +1,7 @@
 //! This module contains the various structures and helpers to interact with the
 //! config files.
 
+mod ai;
 mod database;
 mod loader;
 mod logging;
@@ -9,6 +10,7 @@ mod secret;
 mod telegram;
 mod top_level;
 
+pub use ai::*;
 pub use database::*;
 pub use loader::*;
 pub use logging::*;
