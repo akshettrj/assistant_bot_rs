@@ -63,8 +63,12 @@ impl ClaudeCli {
 
     fn command(&self, request: &Request, schema: &str, dir: &Path) -> Command {
         let mut command = Command::new(&self.program);
+        // Not `--bare`, which ignores subscription tokens: an empty HOME and
+        // working directory leave no settings, hooks, plugins or CLAUDE.md to
+        // load, and the flags turn off tools, MCP servers and skills.
         command
-            .args(["-p", "--bare", "--tools", "", "--no-session-persistence"])
+            .args(["-p", "--tools", "", "--strict-mcp-config"])
+            .args(["--disable-slash-commands", "--no-session-persistence"])
             .args(["--output-format", "json", "--json-schema", schema])
             .args([
                 "--system-prompt",
@@ -248,9 +252,10 @@ echo '{"type":"result","is_error":false,"result":"","structured_output":{"answer
             args,
             [
                 "-p",
-                "--bare",
                 "--tools",
                 "",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
                 "--no-session-persistence",
                 "--output-format",
                 "json",

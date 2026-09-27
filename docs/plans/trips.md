@@ -102,12 +102,13 @@ settle-up, with optional AI parsing of messages and receipts.
   backend, `ClaudeCli`, runs the Claude Code CLI with the user's subscription:
 
   ```sh
-  claude -p --bare --tools "" --no-session-persistence \
+  claude -p --tools "" --strict-mcp-config --disable-slash-commands \
+    --no-session-persistence \
     --output-format json --json-schema <schema> \
     --system-prompt <prompt> --model <model>
   ```
 
-  with the message on stdin, in an empty temporary directory, and only
+  (not `--bare`, which ignores subscription tokens), with the message on stdin, in an empty temporary directory, and only
   `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, valid a year) passed
   through; the reply is `structured_output`. No tools means a prompt injection
   can at worst produce a bad draft. At most 2 concurrent calls, a 60 s
