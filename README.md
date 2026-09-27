@@ -153,11 +153,12 @@ settings change.
 
 ## Built-in modules
 
-| Module     | Commands                 | Access           |
-| ---------- | ------------------------ | ---------------- |
-| `general`  | `/start`, `/help`, `/id` | everyone         |
-| `lights`   | `/light`                 | restricted       |
-| `settings` | `/config`                | owner only       |
+| Module     | Commands                                            | Access     |
+| ---------- | --------------------------------------------------- | ---------- |
+| `general`  | `/start`, `/help`, `/id`                            | everyone   |
+| `lights`   | `/light`                                            | restricted |
+| `trips`    | `/trip`, `/spent`, `/balance`, `/settle`, `/export` | restricted |
+| `settings` | `/config`                                           | owner only |
 
 ### Lights
 
@@ -279,6 +280,46 @@ The Tuya protocol is handled by [rustuya](https://crates.io/crates/rustuya)
 behind a small driver trait (`modules::lights::driver`), so other kinds of
 lights can be added without touching the commands or the panel.
 
+### Trips
+
+Shared trip expenses, like Splitwise: who paid, who owes, and the fewest
+payments that settle up. A trip belongs to a chat (a group, or your private
+chat for a personal trip), and has one currency its balances are kept in.
+
+```
+/trip new Goa INR              start a trip in this chat (you're on it)
+/trip join                     join this chat's trip
+/trip add Mom                  add someone without Telegram (the trip's creator)
+/spent 2400 dinner             you paid, split equally with everyone
+/spent 30 USD taxi #transport  in another currency, with a category
+/balance                       who owes whom, with a button per payment to make
+/settle 500 to Ann             log that you paid someone back
+/trip                          the panel: balances, entries, people, rates,
+                               summary, export, end, other trips
+/export                        every entry as a CSV file
+```
+
+Every expense is first shown on a **draft card** with buttons to change the
+amount, payers (several people can pay), split (equally among some, by shares,
+or exact amounts), category, date and currency, and is only saved when its
+author presses ✅. Saved entries can be edited or deleted (by whoever logged
+them, or the trip's creator) from the panel's entries; deletions keep a
+history and can be undone. In a private chat, `/trip` switches between your
+trips, and expenses logged there are announced in the trip's chat
+(`notify_home_chat`).
+
+Money is exact: amounts are decimals rounded to each currency's minor unit,
+and a split hands the leftover paise to the largest remainders, so shares
+always add up to the total. An expense in another currency is converted once,
+when it's logged, with the trip's fixed rate for it (set from the panel, e.g.
+what your forex card charges), else the day's European Central Bank rate from
+[Frankfurter](https://frankfurter.dev) (`auto_rates`), else a rate you give.
+
+Ending a trip (`/trip end`, or from the panel) posts its summary (spent by
+category, each person's paid and share, the settle-up) and only lets
+settlements in; its creator can reopen it. The design, including the AI
+parsing planned next, is in [docs/plans/trips.md](docs/plans/trips.md).
+
 ## Architecture
 
 ```
@@ -299,6 +340,8 @@ src/
 ├── modules/                  Module trait, registry, built-in modules
 │   ├── general.rs            /start, /help, /id
 │   ├── lights/               /light: Tuya bulbs over the LAN, schedules
+│   ├── trips/                /trip, /spent: shared trip expenses; pure money
+│   │                         logic (money, ledger, draft), service, telegram/
 │   └── settings.rs           /config: mounts the panel with the bot's hooks
 └── db/                       connection, entities, repositories
 crates/
@@ -468,6 +511,9 @@ DATABASE_URL=sqlite://assistant_bot.sqlite?mode=rwc \
 
 Register new migrations in `migration/src/lib.rs`, add or update the entity in
 `src/db/entities/`, and put the queries in `src/db/repositories/`.
+
+Store exact decimals (money, rates) as `db::types::Dec`, a TEXT column: SQLite
+has no exact decimal type, and SeaORM's decimals go through a float there.
 
 ## Development
 
