@@ -115,9 +115,13 @@ them.
      reads its items, the printed total and tax, service or tip (as extras)
      into claims; their numbers must appear in the transcript or the caption,
      and Rust checks the items against the total.
-  4. Questions: the AI picks a query from a fixed menu (`spend(by=category |
-     person, range, ..)`); Rust runs it and templates every number in the
-     reply.
+  4. Questions (`/ask`, or `/ai` with a question): the AI picks up to three
+     queries from a fixed menu (`query.rs`: a measure — spent, paid, share,
+     count, per day, list, balance; a breakdown by category, person or day;
+     filters on kind, people, payers, categories, currency, dates, words);
+     Rust checks them (`ask.rs`: names, categories, dates, a list's length
+     must be in the question), runs them and templates every number in the
+     reply, headed by the query spelled out.
   5. Dates: the AI copies them (ISO date, `today`, `yesterday`, a weekday);
      Rust resolves them in the bot's time zone.
   6. The trip story is prose that must contain no digits; Rust appends the

@@ -10,15 +10,19 @@
 //! Every entry goes through a [`draft::Draft`] shown on a [`card`], which is
 //! saved when its author presses ✅.
 
+pub mod ask;
 pub mod card;
 pub mod claims;
 pub mod command;
 pub mod draft;
 pub mod extract;
+#[cfg(test)]
+mod fixtures;
 pub mod ledger;
 pub mod model;
 pub mod money;
 pub mod panel;
+pub mod query;
 pub mod rates;
 pub mod report;
 pub mod service;
@@ -67,6 +71,8 @@ enum Command {
                        Bob"
     )]
     Ai(String),
+    #[command(description = "ask the AI about the trip's spending: /ask how much on food?")]
+    Ask(String),
 }
 
 /// What the module's handlers share, besides the app's context.

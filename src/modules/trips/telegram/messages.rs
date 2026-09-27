@@ -11,7 +11,7 @@ use teloxide::{
     utils::html::escape,
 };
 
-use super::{current_settings, drafts, edit, reply, reply_error, reply_with, today};
+use super::{current_settings, drafts, edit, questions, reply, reply_error, reply_with, today};
 use crate::{
     ai::{self, Llm},
     bot::AssistantBot,
@@ -19,7 +19,7 @@ use crate::{
     modules::{
         HandlerResult,
         trips::{
-            TripsState,
+            TripsState, ask,
             extract::{self, Reading, Rejection, Sources},
             model, service,
             service::{StoredDraft, TripView, TripsError},
@@ -30,7 +30,7 @@ use crate::{
 pub const AI_USAGE: &str = "/ai <what you spent, in plain words>\ne.g. /ai dinner 2400 split with \
                             Bob\n/ai Bob paid 1,000 and I paid 1,400 for the hotel yesterday\nOr \
                             send a receipt's photo with /ai as its caption, or reply to one with \
-                            /ai";
+                            /ai\nAsk about the trip with /ai or /ask: /ask how much on food?";
 
 /// The text after the `ai_keyword`, when `msg` starts with it and its sender
 /// may use the AI: the message is then for the AI to read.
@@ -260,7 +260,7 @@ async fn download(bot: &AssistantBot, photo: &Photo) -> Result<ai::Image, String
 }
 
 /// The AI, if `user` may use it; else why not.
-fn llm_for(ctx: &AppContext, user: &User) -> Result<Arc<dyn Llm>, &'static str> {
+pub(super) fn llm_for(ctx: &AppContext, user: &User) -> Result<Arc<dyn Llm>, &'static str> {
     let llm = ctx
         .ai
         .clone()
@@ -302,6 +302,10 @@ pub async fn read(
         Some(photo) => (Some(photo), None),
         None => replied_photo(msg).map_or((None, None), |(photo, caption)| (Some(photo), caption)),
     };
+    // A question (without an image to read) is for the queries.
+    if photo.is_none() && ask::looks_like_question(text) {
+        return questions::ask(bot, ctx, msg, user, text).await;
+    }
     if text.is_empty() && photo.is_none() {
         return reply(bot, msg, escape(AI_USAGE)).await;
     }

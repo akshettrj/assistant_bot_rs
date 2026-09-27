@@ -4,6 +4,7 @@
 pub mod drafts;
 pub mod messages;
 pub mod panel;
+pub mod questions;
 
 use std::sync::Arc;
 
@@ -153,6 +154,7 @@ pub async fn handle_command(
         Command::Settle(args) => panel::settle(&bot, &ctx, &state, &msg, &user, &args).await,
         Command::Export => panel::export_command(&bot, &ctx, &msg).await,
         Command::Ai(args) => messages::read(&bot, &ctx, &state, &msg, &user, &args, None).await,
+        Command::Ask(args) => questions::ask(&bot, &ctx, &msg, &user, &args).await,
     }
 }
 

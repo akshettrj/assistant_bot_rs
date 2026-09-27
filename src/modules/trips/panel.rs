@@ -400,7 +400,7 @@ pub fn entries(
 }
 
 /// `Sat 26 Sep · dinner · 2,400.00 INR · Ann`
-fn entry_line(trip: &TripView, record: &EntryRecord, today: NaiveDate) -> String {
+pub fn entry_line(trip: &TripView, record: &EntryRecord, today: NaiveDate) -> String {
     let entry = &record.entry;
     let payers: Vec<String> = record
         .payers

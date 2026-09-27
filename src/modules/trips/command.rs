@@ -19,7 +19,8 @@ pub const TRIP_USAGE: &str =
      name on the trip · /trip nick <name> — another name you go by\n/trip rename <name> — rename \
      the trip · /trip end, /trip reopen — end the trip with a summary, or reopen it (the trip's \
      creator)\n/spent 2400 dinner or /ai dinner 2400 split with Bob — log an expense · /balance — \
-     who owes whom · /settle — settle up · /export — a CSV file";
+     who owes whom · /settle — settle up · /export — a CSV file\n/ask how much on food? — ask the \
+     AI about the spending";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \

@@ -360,6 +360,20 @@ Your name on a trip starts as your Telegram first name: `/trip myname Alex`
 changes it, and `/trip nick Lex` adds another name you go by, so that the AI
 (and everyone's messages) know you by it.
 
+#### Questions
+
+Ask about the spending with `/ask`, or with `/ai` (or the keyword) and a
+question (one ending with `?` or starting with how, what, who, …): `/ask how
+much did we spend on food?`, "who paid the most?", "my share by day", "what
+did Bob pay for?", "the 5 biggest expenses", "how much do we spend a day this
+week?", "how much has Bob paid back?", "who owes me?". The AI only picks
+queries from a fixed menu (spent, paid, share, count, per day, a list, the
+balances; broken down by category, person or day; for some people, payers,
+categories, a currency, dates or words); the bot runs them on the stored
+amounts and writes every number. Each answer starts with the question as the
+bot understood it ("Paid, by person · 🍽 Food · since Sun 20 Sep"), so a
+misreading shows.
+
 ## AI
 
 Modules can read what people write with a language model: the Claude Code

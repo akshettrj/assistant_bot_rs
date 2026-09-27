@@ -192,8 +192,8 @@ pub fn schema(categories: &[Category]) -> Value {
     })
 }
 
-/// The instructions for reading a message sent by `sender` on the trip.
-pub fn instructions(trip: &TripView, sender: &Member, categories: &[Category]) -> String {
+/// Everyone on the trip but `sender`, with their nicknames, for a prompt.
+pub(super) fn others(trip: &TripView, sender: &Member) -> String {
     let others: Vec<String> = trip
         .members
         .iter()
@@ -203,16 +203,26 @@ pub fn instructions(trip: &TripView, sender: &Member, categories: &[Category]) -
             nicknames => format!("{} (also {})", member.name, nicknames.join(", ")),
         })
         .collect();
-    let others = if others.is_empty() {
+    if others.is_empty() {
         "nobody else".to_string()
     } else {
         others.join(", ")
-    };
-    let categories = categories
+    }
+}
+
+/// `categories` as a prompt lists them: `food (🍽 Food), …`.
+pub(super) fn listed(categories: &[Category]) -> String {
+    categories
         .iter()
         .map(|category| format!("{} ({})", category.id, category.label))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(", ")
+}
+
+/// The instructions for reading a message sent by `sender` on the trip.
+pub fn instructions(trip: &TripView, sender: &Member, categories: &[Category]) -> String {
+    let others = others(trip, sender);
+    let categories = listed(categories);
     let myself = sender.names().collect::<Vec<_>>().join(", ");
     let base = trip.trip.base;
     format!(
