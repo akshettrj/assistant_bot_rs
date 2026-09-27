@@ -114,15 +114,16 @@ settle-up, with optional AI parsing of messages and receipts.
   can at worst produce a bad draft. At most 2 concurrent calls, a 60 s
   timeout, a "🤔 reading…" placeholder. Tests use `FakeLlm`.
 - **Who**: the owner and the sudo users, plus `ai.users` (personal use of
-  the subscription). In groups, only messages mentioning or replying to the
-  bot are parsed.
+  the subscription).
+- **When**: only on request: `/ai <text>`, or a message starting with the
+  optional `ai_keyword`. Nothing else is read.
 - Receipt images need `--input-format stream-json` with an image block: to be
   proven by a spike before phase 3.
 
 ## Settings
 
 - Runtime (`[modules.trips]`): `default_currency`, `notify_home_chat`,
-  `categories`, `auto_rates`, `ai_messages`.
+  `categories`, `auto_rates`, `ai_keyword`.
 - The AI is shared by all modules, so it is configured in the core `[ai]`
   section: `model` and `users` are runtime settings; `oauth_token` (a
   `Secret`), `claude_path`, `timeout_secs` and `max_concurrent` are file/env

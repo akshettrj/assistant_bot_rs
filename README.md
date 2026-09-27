@@ -153,12 +153,12 @@ settings change.
 
 ## Built-in modules
 
-| Module     | Commands                                            | Access     |
-| ---------- | --------------------------------------------------- | ---------- |
-| `general`  | `/start`, `/help`, `/id`                            | everyone   |
-| `lights`   | `/light`                                            | restricted |
-| `trips`    | `/trip`, `/spent`, `/balance`, `/settle`, `/export` | restricted |
-| `settings` | `/config`                                           | owner only |
+| Module     | Commands                                                   | Access     |
+| ---------- | ---------------------------------------------------------- | ---------- |
+| `general`  | `/start`, `/help`, `/id`                                   | everyone   |
+| `lights`   | `/light`                                                   | restricted |
+| `trips`    | `/trip`, `/spent`, `/ai`, `/balance`, `/settle`, `/export` | restricted |
+| `settings` | `/config`                                                  | owner only |
 
 ### Lights
 
@@ -322,14 +322,15 @@ settlements in; its creator can reopen it. The design is in
 
 #### Expenses in plain words
 
-With the AI set up (see [AI](#ai)), you can also just write: "dinner 2400,
-split with Ann", "Bob paid 1,000 and I paid 1,400 for the hotel yesterday",
-"$30 taxi". In a private chat any message works; in a group, mention the bot
-or reply to it. The AI only copies what the message says into a draft card
+With the AI set up (see [AI](#ai)), you can also write in plain words, after
+`/ai`: `/ai dinner 2400 split with Ann`, `/ai Bob paid 1,000 and I paid 1,400
+for the hotel yesterday`, `/ai $30 taxi`. Set `modules.trips.ai_keyword` (e.g.
+`log`) to also read messages starting with that word ("log dinner 2400"); in
+groups, the bot only sees those with its privacy mode off. Nothing else is read
+by the AI. It only copies what the message says into a draft card
 marked 🤖, which you check and save as usual. It never does the maths: any
 amount it gives that isn't written in your message is refused, and every
-total, share and conversion is computed by the bot. Turn it off with
-`modules.trips.ai_messages`.
+total, share and conversion is computed by the bot.
 
 ## AI
 

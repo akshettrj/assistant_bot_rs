@@ -25,10 +25,10 @@ pub struct TripsSettings {
     /// fixed one.
     #[serde(deserialize_with = "yes_or_no")]
     pub auto_rates: bool,
-    /// Whether the AI reads expenses from plain messages (in private, or
-    /// mentioning or replying to the bot in groups), when `[ai]` is set up.
-    #[serde(deserialize_with = "yes_or_no")]
-    pub ai_messages: bool,
+    /// A word that makes a message be read by the AI, like `/ai`: "log dinner
+    /// 2400". None by default: only `/ai` does.
+    #[serde(deserialize_with = "keyword")]
+    pub ai_keyword: Option<String>,
 }
 
 impl Default for TripsSettings {
@@ -38,7 +38,7 @@ impl Default for TripsSettings {
             notify_home_chat: true,
             categories: BTreeMap::new(),
             auto_rates: true,
-            ai_messages: true,
+            ai_keyword: None,
         }
     }
 }
@@ -76,22 +76,35 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         optional: false,
     }),
     RuntimeSetting::new(
-        "ai_messages",
-        "Whether the AI reads expenses from plain messages: in private, or mentioning or replying \
-         to the bot in groups",
+        "ai_keyword",
+        "A word that makes a message be read by the AI like /ai, e.g. log for \"log dinner 2400\" \
+         (in groups, the bot only sees it with privacy mode off)",
     )
-    .titled("Read messages with AI")
-    .kind(Kind::OneOf {
-        choices: Choices::Fixed(YES_OR_NO),
-        custom: false,
-        optional: false,
-    }),
+    .titled("AI keyword")
+    .kind(Kind::Text { optional: true }),
     RuntimeSetting::per_entry(
         "categories",
         "Extra expense categories: an id, and a label with an emoji (e.g. 🛂 Visa)",
         &Kind::Text { optional: false },
     ),
 ];
+
+/// A keyword: one word, kept in lower case; blank means none.
+fn keyword<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let Some(word) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let word = word.trim().to_lowercase();
+    if word.is_empty() {
+        Ok(None)
+    } else if word.split_whitespace().count() > 1 || word.starts_with('/') {
+        Err(serde::de::Error::custom(format!(
+            "`{word}` is not a keyword: use a single word, e.g. log"
+        )))
+    } else {
+        Ok(Some(word))
+    }
+}
 
 /// A boolean, from the config file (`true`) or from the settings panel's
 /// choices (`"true"`).
@@ -136,5 +149,22 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ai_keywords_are_single_words() {
+        let keyword = |value: serde_json::Value| {
+            serde_json::from_value::<TripsSettings>(serde_json::json!({ "ai_keyword": value }))
+                .map(|settings| settings.ai_keyword)
+        };
+        assert_eq!(
+            keyword(serde_json::json!(" Log ")).unwrap().as_deref(),
+            Some("log")
+        );
+        assert_eq!(keyword(serde_json::json!("  ")).unwrap(), None);
+        assert_eq!(keyword(serde_json::Value::Null).unwrap(), None);
+        assert!(keyword(serde_json::json!("log it")).is_err());
+        assert!(keyword(serde_json::json!("/ai")).is_err());
+        assert_eq!(TripsSettings::default().ai_keyword, None);
     }
 }

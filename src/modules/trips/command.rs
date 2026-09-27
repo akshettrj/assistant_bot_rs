@@ -15,8 +15,9 @@ pub const TRIP_USAGE: &str =
     "/trip — this chat's trip: balances, entries, people, rates\n/trip new <name> [currency] — \
      start a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this chat's trip\n/trip \
      add <name> — add someone without Telegram (the trip's creator)\n/trip end, /trip reopen — \
-     end the trip with a summary, or reopen it (the trip's creator)\n/spent 2400 dinner — log an \
-     expense · /balance — who owes whom · /settle — settle up · /export — a CSV file";
+     end the trip with a summary, or reopen it (the trip's creator)\n/spent 2400 dinner or /ai \
+     dinner 2400 split with Bob — log an expense · /balance — who owes whom · /settle — settle up \
+     · /export — a CSV file";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \

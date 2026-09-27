@@ -61,6 +61,11 @@ enum Command {
     Settle(String),
     #[command(description = "the trip's entries as a CSV file")]
     Export,
+    #[command(
+        description = "log an expense in plain words, read by the AI: /ai dinner 2400 split with \
+                       Bob"
+    )]
+    Ai(String),
 }
 
 /// What the module's handlers share, besides the app's context.
@@ -156,8 +161,8 @@ impl Module for TripsModule {
             )
             .branch(
                 Update::filter_message()
-                    .filter(telegram::messages::is_for_ai)
-                    .endpoint(telegram::messages::read_message),
+                    .filter_map(telegram::messages::after_keyword)
+                    .endpoint(telegram::messages::read_keyword),
             )
             .branch(
                 Update::filter_callback_query()
