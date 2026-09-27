@@ -207,6 +207,37 @@ pub fn parse_settle(args: &str) -> Result<Option<Settle>, String> {
     }))
 }
 
+/// A member and a nickname: `Erin Rinny`, or `Erin: Rinny` when names have
+/// spaces.
+pub fn parse_nickname(text: &str, trip: &TripView) -> Result<(MemberId, String), String> {
+    let text = text.trim();
+    let usage = || "send a name and a nickname, e.g. Erin Rinny".to_string();
+    let (name, nickname) = match text.split_once([':', '=']) {
+        Some((name, nickname)) => (name.trim(), nickname.trim()),
+        // The longest name the text starts with, else its first word.
+        None => trip
+            .members
+            .iter()
+            .flat_map(|member| member.names())
+            .filter(|name| {
+                text.get(..name.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(name))
+                    && text[name.len()..].starts_with(char::is_whitespace)
+            })
+            .max_by_key(|name| name.len())
+            .map(|name| (&text[..name.len()], text[name.len()..].trim()))
+            .or_else(|| text.split_once(char::is_whitespace))
+            .ok_or_else(usage)?,
+    };
+    if nickname.is_empty() {
+        return Err(usage());
+    }
+    let member = trip
+        .find_by_name(name)
+        .ok_or_else(|| format!("who is {name}? The trip has {}", names(trip)))?;
+    Ok((member.id, nickname.to_string()))
+}
+
 /// A fixed rate: `USD 83.25` or `83.25 USD`.
 pub fn parse_rate(text: &str) -> Result<(Currency, Rate), String> {
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -596,6 +627,7 @@ mod tests {
                     id,
                     name: (*name).to_string(),
                     user: None,
+                    nicknames: Vec::new(),
                 })
                 .collect(),
         }
@@ -659,6 +691,23 @@ mod tests {
         assert!(parse_settle("500 Ann").is_err());
         assert!(parse_settle("to Ann").is_err());
         assert!(parse_settle("500 to").is_err());
+    }
+
+    #[test]
+    fn nicknames_follow_a_name() {
+        let mut trip = goa();
+        trip.members[0].name = "Ann Lee".into();
+        assert_eq!(parse_nickname("Bob Bobby", &trip), Ok((2, "Bobby".into())));
+        assert_eq!(
+            parse_nickname("ann lee Annie", &trip),
+            Ok((1, "Annie".into()))
+        );
+        assert_eq!(
+            parse_nickname("Mom: Ma Rainey", &trip),
+            Ok((3, "Ma Rainey".into()))
+        );
+        assert!(parse_nickname("Bob", &trip).is_err());
+        assert!(parse_nickname("Zed Z", &trip).is_err());
     }
 
     #[test]

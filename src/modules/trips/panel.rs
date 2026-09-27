@@ -51,6 +51,7 @@ pub enum Page {
 pub enum Field {
     Person,
     Rate,
+    Nickname,
 }
 
 impl Field {
@@ -60,6 +61,7 @@ impl Field {
             Self::Rate => {
                 format!("Send a currency and how much {base} one unit costs, e.g. USD 83.25")
             }
+            Self::Nickname => "Who, and what else do they go by? e.g. Erin Rinny".to_string(),
         }
     }
 
@@ -67,6 +69,7 @@ impl Field {
         match self {
             Self::Person => "Mom",
             Self::Rate => "USD 83.25",
+            Self::Nickname => "Erin Rinny",
         }
     }
 }
@@ -87,6 +90,8 @@ pub enum Action {
     Delete(i32),
     Restore(i32),
     RemoveRate(Currency),
+    /// Forgets member `.0`'s `.1`th nickname.
+    RemoveNickname(MemberId, usize),
     Ask(Field),
     /// Ends the trip, posting its summary.
     End,
@@ -111,8 +116,10 @@ impl Action {
             Self::Delete(id) => format!("x:{id}"),
             Self::Restore(id) => format!("rs:{id}"),
             Self::RemoveRate(currency) => format!("rr:{currency}"),
+            Self::RemoveNickname(member, index) => format!("nx:{member}:{index}"),
             Self::Ask(Field::Person) => "a:person".to_string(),
             Self::Ask(Field::Rate) => "a:rate".to_string(),
+            Self::Ask(Field::Nickname) => "a:nick".to_string(),
             Self::Show(Page::Summary) => "sum".to_string(),
             Self::Show(Page::ConfirmEnd) => "ce".to_string(),
             Self::End => "end".to_string(),
@@ -143,6 +150,7 @@ impl Action {
             "x" => Self::Delete(next()?.parse().ok()?),
             "rs" => Self::Restore(next()?.parse().ok()?),
             "rr" => Self::RemoveRate(Currency::from_code(next()?).ok()?),
+            "nx" => Self::RemoveNickname(next()?.parse().ok()?, next()?.parse().ok()?),
             "sum" => Self::Show(Page::Summary),
             "ce" => Self::Show(Page::ConfirmEnd),
             "end" => Self::End,
@@ -151,6 +159,7 @@ impl Action {
             "a" => match next()? {
                 "person" => Self::Ask(Field::Person),
                 "rate" => Self::Ask(Field::Rate),
+                "nick" => Self::Ask(Field::Nickname),
                 _ => return None,
             },
             _ => return None,
@@ -534,6 +543,9 @@ pub fn people(trip: &TripView) -> Rendered {
     let mut lines = vec![title(&trip.trip, "👥 People")];
     for member in &trip.members {
         let mut line = member.name.clone();
+        if !member.nicknames.is_empty() {
+            line.push_str(&format!(" (also {})", member.nicknames.join(", ")));
+        }
         if member.user.is_none() {
             line.push_str(" (no Telegram)");
         }
@@ -543,14 +555,35 @@ pub fn people(trip: &TripView) -> Rendered {
         lines.push(escape(&line));
     }
     lines.push(escape("\nOthers join with /trip join in the trip's chat."));
-    let mut keyboard = rows(
-        vec![button(
-            id,
-            "✍️ Add someone without Telegram…",
-            &Action::Ask(Field::Person),
-        )],
+    let forget: Vec<_> = trip
+        .members
+        .iter()
+        .flat_map(|member| {
+            member
+                .nicknames
+                .iter()
+                .enumerate()
+                .map(|(index, nickname)| {
+                    button(
+                        id,
+                        format!("🗑 {nickname}"),
+                        &Action::RemoveNickname(member.id, index),
+                    )
+                })
+        })
+        .collect();
+    let mut keyboard = rows(forget, 3);
+    keyboard.extend(rows(
+        vec![
+            button(id, "✍️ Add a nickname…", &Action::Ask(Field::Nickname)),
+            button(
+                id,
+                "✍️ Add someone without Telegram…",
+                &Action::Ask(Field::Person),
+            ),
+        ],
         1,
-    );
+    ));
     keyboard.push(back(id, Page::Home));
     Rendered {
         text: lines.join("\n"),
@@ -694,6 +727,7 @@ mod tests {
                     id,
                     name: (*name).to_string(),
                     user: (id < 3).then_some(UserId(id.unsigned_abs().into())),
+                    nicknames: Vec::new(),
                 })
                 .collect(),
         }
@@ -721,6 +755,8 @@ mod tests {
             Action::RemoveRate(inr()),
             Action::Ask(Field::Person),
             Action::Ask(Field::Rate),
+            Action::Ask(Field::Nickname),
+            Action::RemoveNickname(12, 3),
             Action::Show(Page::Summary),
             Action::Show(Page::ConfirmEnd),
             Action::End,

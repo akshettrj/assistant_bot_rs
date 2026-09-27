@@ -374,6 +374,19 @@ pub async fn press(
             service::restore_entry(db, &trip, id, user).await?;
             (Page::Entry(id), Toast::new("↩️ Restored"))
         }
+        Action::RemoveNickname(member, index) => {
+            let nickname = trip
+                .member(member)
+                .and_then(|member| member.nicknames.get(index))
+                .cloned();
+            match nickname {
+                Some(nickname) => {
+                    service::remove_nickname(db, &trip, user, member, &nickname).await?;
+                    (Page::People, Toast::new(format!("Forgot {nickname}")))
+                }
+                None => (Page::People, Toast::alert("That nickname is already gone")),
+            }
+        }
         Action::RemoveRate(currency) => {
             service::remove_rate(db, &trip, user, currency).await?;
             (
@@ -474,6 +487,13 @@ pub async fn handle_input(
                 Ok((currency, rate)) => {
                     service::set_rate(&ctx.db, &trip, user, currency, rate).await?;
                     Page::Rates
+                }
+                Err(problem) => return Ok(Err(problem)),
+            },
+            Field::Nickname => match command::parse_nickname(text, &trip) {
+                Ok((member, nickname)) => {
+                    service::add_nickname(&ctx.db, &trip, user, member, &nickname).await?;
+                    Page::People
                 }
                 Err(problem) => return Ok(Err(problem)),
             },

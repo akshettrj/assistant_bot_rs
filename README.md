@@ -304,7 +304,9 @@ amount, payers (several people can pay), split (equally among some, by shares,
 or exact amounts), category, date and currency, and is only saved when its
 author presses ✅. Saved entries can be edited or deleted (by whoever logged
 them, or the trip's creator) from the panel's entries; deletions keep a
-history and can be undone. In a private chat, `/trip` switches between your
+history and can be undone. Nicknames ("Rinny" for Erin), added from the
+panel's 👥 People, work wherever a name does, for the AI too. In a private
+chat, `/trip` switches between your
 trips, and expenses logged there are announced in the trip's chat
 (`notify_home_chat`).
 

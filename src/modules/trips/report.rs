@@ -284,6 +284,7 @@ mod tests {
                     id,
                     name: (*name).to_string(),
                     user: None,
+                    nicknames: Vec::new(),
                 })
                 .collect(),
         }

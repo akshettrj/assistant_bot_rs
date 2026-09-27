@@ -143,6 +143,7 @@ pub async fn add_member(
         trip_id: Set(trip_id),
         name: Set(name.to_string()),
         user_id: Set(user.map(to_db_id).transpose()?),
+        nicknames: Set("[]".to_string()),
         created_at: Set(Utc::now()),
         ..Default::default()
     }
@@ -198,6 +199,24 @@ pub async fn rename_member(
     trip_members::ActiveModel {
         id: Unchanged(member_id),
         name: Set(name.to_string()),
+        ..Default::default()
+    }
+    .update(db)
+    .await?;
+    Ok(())
+}
+
+/// Replaces the other names a member goes by.
+pub async fn set_nicknames(
+    db: &impl ConnectionTrait,
+    member_id: i32,
+    nicknames: &[String],
+) -> Result<(), DbErr> {
+    let json = serde_json::to_string(nicknames)
+        .map_err(|error| DbErr::Custom(format!("nicknames: {error}")))?;
+    trip_members::ActiveModel {
+        id: Unchanged(member_id),
+        nicknames: Set(json),
         ..Default::default()
     }
     .update(db)

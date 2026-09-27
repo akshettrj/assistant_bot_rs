@@ -85,33 +85,40 @@ impl TripView {
         self.members.iter().map(|member| member.id).collect()
     }
 
-    /// The member called `name`, ignoring case; else the only one whose name
-    /// starts with it.
+    /// The member called `name` (or nicknamed so), ignoring case; else the
+    /// only one whose name or nickname starts with it.
     pub fn find_by_name(&self, name: &str) -> Option<&Member> {
         let name = name.trim().to_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        let called = |member: &&Member, test: &dyn Fn(&str) -> bool| {
+            member.names().any(|called| test(&called.to_lowercase()))
+        };
         if let Some(member) = self
             .members
             .iter()
-            .find(|member| member.name.to_lowercase() == name)
+            .find(|member| called(member, &|called| called == name))
         {
             return Some(member);
         }
         let mut starting = self
             .members
             .iter()
-            .filter(|member| member.name.to_lowercase().starts_with(&name));
+            .filter(|member| called(member, &|called| called.starts_with(&name)));
         match (starting.next(), starting.next()) {
-            (Some(member), None) if !name.is_empty() => Some(member),
+            (Some(member), None) => Some(member),
             _ => None,
         }
     }
 
-    /// Whether someone on the trip is called `name`, ignoring case.
+    /// Whether someone on the trip is called or nicknamed `name`, ignoring
+    /// case.
     pub fn has_name(&self, name: &str) -> bool {
         let name = name.trim().to_lowercase();
         self.members
             .iter()
-            .any(|member| member.name.to_lowercase() == name)
+            .any(|member| member.names().any(|called| called.to_lowercase() == name))
     }
 
     /// The member `user` is, who must be on the trip.
@@ -215,6 +222,56 @@ pub async fn add_person(
     Ok(trips::add_member(db, trip.trip.id, name, None)
         .await?
         .into())
+}
+
+/// The longest name or nickname, to keep cards and buttons readable.
+const MAX_NAME: usize = 30;
+
+/// Adds another name member `id` goes by; anyone on the trip may.
+pub async fn add_nickname(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    id: MemberId,
+    nickname: &str,
+) -> Result<()> {
+    trip.require_member(by)?;
+    let nickname = nickname.trim();
+    if nickname.is_empty() || nickname.chars().count() > MAX_NAME {
+        return Err(TripsError::Invalid(format!(
+            "a nickname has 1 to {MAX_NAME} characters"
+        )));
+    }
+    if trip.has_name(nickname) {
+        return Err(TripsError::NameTaken(nickname.to_string()));
+    }
+    let member = trip
+        .member(id)
+        .ok_or_else(|| TripsError::Invalid("that person isn't on the trip".into()))?;
+    let mut nicknames = member.nicknames.clone();
+    nicknames.push(nickname.to_string());
+    Ok(trips::set_nicknames(db, id, &nicknames).await?)
+}
+
+/// Forgets a nickname of member `id`; anyone on the trip may.
+pub async fn remove_nickname(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    id: MemberId,
+    nickname: &str,
+) -> Result<()> {
+    trip.require_member(by)?;
+    let member = trip
+        .member(id)
+        .ok_or_else(|| TripsError::Invalid("that person isn't on the trip".into()))?;
+    let nicknames: Vec<String> = member
+        .nicknames
+        .iter()
+        .filter(|kept| kept.as_str() != nickname)
+        .cloned()
+        .collect();
+    Ok(trips::set_nicknames(db, id, &nicknames).await?)
 }
 
 fn require_creator(trip: &TripView, user: UserId) -> Result<()> {
@@ -858,6 +915,7 @@ mod tests {
                     id,
                     name: (*name).to_string(),
                     user: None,
+                    nicknames: Vec::new(),
                 })
                 .collect(),
         };
@@ -866,6 +924,33 @@ mod tests {
         assert_eq!(trip.find_by_name("b").unwrap().name, "Bob");
         assert_eq!(trip.find_by_name("an"), None);
         assert_eq!(trip.find_by_name(""), None);
+    }
+
+    #[tokio::test]
+    async fn nicknames_find_members_and_stay_unique() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let bob = trip.member_of(BOB).unwrap().id;
+        add_nickname(&db, &trip, ANN, bob, "Bobby").await.unwrap();
+        let trip = load(&db, trip.trip.id).await.unwrap();
+        assert_eq!(trip.find_by_name("bobby").unwrap().name, "Bob");
+        assert!(matches!(
+            add_nickname(&db, &trip, ANN, bob, "ann").await,
+            Err(TripsError::NameTaken(_))
+        ));
+        assert!(matches!(
+            add_nickname(&db, &trip, UserId(99), bob, "B").await,
+            Err(TripsError::NotAMember(_))
+        ));
+        // Someone joining under a nickname gets a variant.
+        let other = join(&db, &trip, UserId(3), "Bobby").await.unwrap();
+        assert_eq!(other.name, "Bobby 2");
+
+        remove_nickname(&db, &trip, BOB, bob, "Bobby")
+            .await
+            .unwrap();
+        let trip = load(&db, trip.trip.id).await.unwrap();
+        assert!(trip.member(bob).unwrap().nicknames.is_empty());
     }
 
     #[tokio::test]

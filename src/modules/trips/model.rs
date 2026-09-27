@@ -47,6 +47,15 @@ pub struct Member {
     pub name: String,
     /// The member's Telegram account, if linked.
     pub user: Option<UserId>,
+    /// Other names they go by: "Rinny" for Erin.
+    pub nicknames: Vec<String>,
+}
+
+impl Member {
+    /// Their name, then their nicknames.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.nicknames.iter().map(String::as_str))
+    }
 }
 
 impl From<trip_members::Model> for Member {
@@ -55,6 +64,7 @@ impl From<trip_members::Model> for Member {
             id: member.id,
             name: member.name,
             user: member.user_id.map(user_id),
+            nicknames: serde_json::from_str(&member.nicknames).unwrap_or_default(),
         }
     }
 }

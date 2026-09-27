@@ -188,11 +188,14 @@ pub fn schema(categories: &[Category]) -> Value {
 
 /// The instructions for reading a message sent by `sender` on the trip.
 pub fn instructions(trip: &TripView, sender: &Member, categories: &[Category]) -> String {
-    let others: Vec<&str> = trip
+    let others: Vec<String> = trip
         .members
         .iter()
         .filter(|member| member.id != sender.id)
-        .map(|member| member.name.as_str())
+        .map(|member| match member.nicknames.as_slice() {
+            [] => member.name.clone(),
+            nicknames => format!("{} (also {})", member.name, nicknames.join(", ")),
+        })
         .collect();
     let others = if others.is_empty() {
         "nobody else".to_string()
@@ -749,6 +752,7 @@ mod tests {
                     id,
                     name: (*name).to_string(),
                     user: None,
+                    nicknames: Vec::new(),
                 })
                 .collect(),
         }
@@ -1013,9 +1017,13 @@ mod tests {
                 .unwrap()
                 .contains(&json!("food"))
         );
-        let trip = goa();
+        let mut trip = goa();
+        trip.members[3].nicknames = vec!["Rinny".into()];
         let text = instructions(&trip, &trip.members[0], &categories);
-        assert!(text.contains("Carol, Dave, Erin"), "{text}");
+        assert!(
+            text.contains("Carol, Dave, Erin (also Rinny)"),
+            "{text}"
+        );
         assert!(text.contains("You never calculate"), "{text}");
         assert!(!text.contains("{ME}"), "{text}");
     }

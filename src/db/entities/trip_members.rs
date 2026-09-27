@@ -11,6 +11,8 @@ pub struct Model {
     pub name: String,
     /// The linked Telegram user, who may then log expenses.
     pub user_id: Option<i64>,
+    /// Other names they go by, as a JSON list.
+    pub nicknames: String,
     pub created_at: DateTimeUtc,
 }
 
