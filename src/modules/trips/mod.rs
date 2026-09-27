@@ -27,6 +27,7 @@ pub mod rates;
 pub mod report;
 pub mod service;
 pub mod settings;
+pub mod story;
 mod telegram;
 pub mod text;
 

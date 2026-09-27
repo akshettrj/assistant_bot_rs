@@ -20,7 +20,7 @@ pub const TRIP_USAGE: &str =
      the trip · /trip end, /trip reopen — end the trip with a summary, or reopen it (the trip's \
      creator)\n/spent 2400 dinner or /ai dinner 2400 split with Bob — log an expense · /balance — \
      who owes whom · /settle — settle up · /export — a CSV file\n/ask how much on food? — ask the \
-     AI about the spending";
+     AI about the spending · /trip story — the trip told by the AI";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
@@ -56,6 +56,8 @@ pub enum TripCommand {
     Rename {
         name: String,
     },
+    /// The trip told by the AI.
+    Story,
 }
 
 pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
@@ -67,6 +69,7 @@ pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
         "help" => Ok(TripCommand::Help),
         "end" => Ok(TripCommand::End),
         "reopen" => Ok(TripCommand::Reopen),
+        "story" => Ok(TripCommand::Story),
         "new" => {
             let mut words: Vec<&str> = rest.split_whitespace().collect();
             let currency = match words.as_slice() {
@@ -603,6 +606,7 @@ mod tests {
         assert!(parse_trip("myname").is_err());
         assert!(parse_trip("rename").is_err());
         assert_eq!(parse_trip("reopen"), Ok(TripCommand::Reopen));
+        assert_eq!(parse_trip("Story"), Ok(TripCommand::Story));
         assert!(parse_trip("add").is_err());
         assert!(parse_trip("new").is_err());
         assert!(parse_trip("fly").is_err());

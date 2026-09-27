@@ -124,8 +124,9 @@ them.
      reply, headed by the query spelled out.
   5. Dates: the AI copies them (ISO date, `today`, `yesterday`, a weekday);
      Rust resolves them in the bot's time zone.
-  6. The trip story is prose that must contain no digits; Rust appends the
-     numbers.
+  6. The trip story (`/trip story`, `story.rs`) is prose from the entries'
+     days, descriptions, categories and people, given no amounts; sentences
+     with a digit are dropped, and Rust appends the summary.
 - **Backend**: an `Llm` trait in `src/ai/` (shared by modules). The first
   backend, `ClaudeCli`, runs the Claude Code CLI with the user's subscription:
 

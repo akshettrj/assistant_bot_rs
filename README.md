@@ -374,6 +374,11 @@ amounts and writes every number. Each answer starts with the question as the
 bot understood it ("Paid, by person · 🍽 Food · since Sun 20 Sep"), so a
 misreading shows.
 
+`/trip story` has the AI tell the trip in a short paragraph or two, from what
+was bought, when and by whom, followed by the summary. It is given no amounts,
+and any sentence of its with a digit in it is dropped: the numbers are the
+summary's.
+
 ## AI
 
 Modules can read what people write with a language model: the Claude Code

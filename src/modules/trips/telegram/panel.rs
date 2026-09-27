@@ -124,6 +124,7 @@ pub async fn trip(
             }
             .await
         }
+        TripCommand::Story => return super::story::tell(bot, ctx, msg, user).await,
         TripCommand::Rename { name } => {
             async {
                 let trip = service::require_active(db, chat).await?;

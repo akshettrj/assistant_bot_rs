@@ -5,6 +5,7 @@ pub mod drafts;
 pub mod messages;
 pub mod panel;
 pub mod questions;
+pub mod story;
 
 use std::sync::Arc;
 
