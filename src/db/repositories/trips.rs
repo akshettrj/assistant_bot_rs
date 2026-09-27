@@ -68,6 +68,17 @@ pub async fn set_status(
     .await
 }
 
+pub async fn rename(db: &impl ConnectionTrait, id: i32, name: &str) -> Result<(), DbErr> {
+    trips::ActiveModel {
+        id: Unchanged(id),
+        name: Set(name.to_string()),
+        ..Default::default()
+    }
+    .update(db)
+    .await?;
+    Ok(())
+}
+
 /// The trips whose home is `chat`, newest first.
 pub async fn in_chat(db: &impl ConnectionTrait, chat: ChatId) -> Result<Vec<trips::Model>, DbErr> {
     Trips::find()

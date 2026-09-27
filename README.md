@@ -290,6 +290,8 @@ chat for a personal trip), and has one currency its balances are kept in.
 /trip new Goa INR              start a trip in this chat (you're on it)
 /trip join                     join this chat's trip
 /trip add Mom                  add someone without Telegram (the trip's creator)
+/trip myname Alex              your name on the trip (/trip nick adds another)
+/trip rename Goa 2026          rename the trip (the trip's creator)
 /spent 2400 dinner             you paid, split equally with everyone
 /spent 30 USD taxi #transport  in another currency, with a category
 /balance                       who owes whom, with a button per payment to make
@@ -352,7 +354,7 @@ reads the items, the total and any tax or service lines as claims; its numbers
 must come from that transcript or your caption, and the bot checks the items
 against the printed total.
 
-Your name on a trip starts as your Telegram first name: `/trip rename Alex`
+Your name on a trip starts as your Telegram first name: `/trip myname Alex`
 changes it, and `/trip nick Lex` adds another name you go by, so that the AI
 (and everyone's messages) know you by it.
 

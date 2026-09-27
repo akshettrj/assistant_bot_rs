@@ -145,7 +145,7 @@ them.
   keyword, or `/ai …` in reply to one, goes to the CLI with
   `--input-format stream-json` as a base64 image block.
 - **Names**: the sender's own names (their name on the trip and nicknames,
-  set with `/trip rename` and `/trip nick`) are given to the AI, since a
+  set with `/trip myname` and `/trip nick`) are given to the AI, since a
   Telegram name needn't be a real one.
 
 ## Settings

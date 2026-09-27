@@ -127,6 +127,18 @@ pub async fn trip(
         TripCommand::Rename { name } => {
             async {
                 let trip = service::require_active(db, chat).await?;
+                service::rename_trip(db, &trip, user.id, &name).await?;
+                Ok(escape(&format!(
+                    "✏️ {} is now {}",
+                    trip.trip.name,
+                    name.trim()
+                )))
+            }
+            .await
+        }
+        TripCommand::MyName { name } => {
+            async {
+                let trip = service::require_active(db, chat).await?;
                 let me = trip
                     .member_of(user.id)
                     .ok_or_else(|| TripsError::NotAMember(trip.trip.name.clone()))?;

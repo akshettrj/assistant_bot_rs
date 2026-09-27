@@ -138,12 +138,13 @@ pub async fn create_trip(
     name: &str,
     base: Currency,
 ) -> Result<TripView> {
+    let name = trip_name(name)?;
     let txn = db.begin().await?;
     let trip = trips::create(
         &txn,
         NewTrip {
             home_chat_id: chat,
-            name: name.trim(),
+            name,
             base_currency: base.code(),
             created_by: creator,
         },
@@ -884,6 +885,31 @@ pub async fn set_status(
         .map_err(TripsError::Corrupt)
 }
 
+/// The longest trip name, to keep messages and buttons readable.
+const MAX_TRIP_NAME: usize = 60;
+
+/// Renames the trip; only its creator may.
+pub async fn rename_trip(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    name: &str,
+) -> Result<()> {
+    require_creator(trip, by)?;
+    Ok(trips::rename(db, trip.trip.id, trip_name(name)?).await?)
+}
+
+/// `name`, trimmed, if it may name a trip.
+fn trip_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_TRIP_NAME {
+        return Err(TripsError::Invalid(format!(
+            "a trip's name has 1 to {MAX_TRIP_NAME} characters"
+        )));
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use rust_decimal::dec;
@@ -979,6 +1005,22 @@ mod tests {
         assert_eq!(trip.find_by_name("b").unwrap().name, "Bob");
         assert_eq!(trip.find_by_name("an"), None);
         assert_eq!(trip.find_by_name(""), None);
+    }
+
+    #[tokio::test]
+    async fn only_the_creator_renames_the_trip() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        assert!(matches!(
+            rename_trip(&db, &trip, BOB, "Gokarna").await,
+            Err(TripsError::NotAllowed(_))
+        ));
+        assert!(matches!(
+            rename_trip(&db, &trip, ANN, "  ").await,
+            Err(TripsError::Invalid(_))
+        ));
+        rename_trip(&db, &trip, ANN, " Goa 2026 ").await.unwrap();
+        assert_eq!(load(&db, trip.trip.id).await.unwrap().trip.name, "Goa 2026");
     }
 
     #[tokio::test]

@@ -15,11 +15,11 @@ use super::{
 pub const TRIP_USAGE: &str =
     "/trip — this chat's trip: balances, entries, people, rates\n/trip new <name> [currency] — \
      start a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this chat's trip\n/trip \
-     add <name> — add someone without Telegram (the trip's creator)\n/trip nick <name> — another \
-     name you go by · /trip rename <name> — your name on the trip\n/trip end, /trip reopen — end \
-     the trip with a summary, or reopen it (the trip's creator)\n/spent 2400 dinner or /ai dinner \
-     2400 split with Bob — log an expense · /balance — who owes whom · /settle — settle up · \
-     /export — a CSV file";
+     add <name> — add someone without Telegram (the trip's creator)\n/trip myname <name> — your \
+     name on the trip · /trip nick <name> — another name you go by\n/trip rename <name> — rename \
+     the trip · /trip end, /trip reopen — end the trip with a summary, or reopen it (the trip's \
+     creator)\n/spent 2400 dinner or /ai dinner 2400 split with Bob — log an expense · /balance — \
+     who owes whom · /settle — settle up · /export — a CSV file";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
@@ -48,6 +48,10 @@ pub enum TripCommand {
         nickname: String,
     },
     /// The sender's new name on the trip.
+    MyName {
+        name: String,
+    },
+    /// The trip's new name.
     Rename {
         name: String,
     },
@@ -90,10 +94,14 @@ pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
             nickname: rest.to_string(),
         }),
         "nick" => Err("give the name you go by, e.g. /trip nick Alex".to_string()),
+        "myname" if !rest.is_empty() => Ok(TripCommand::MyName {
+            name: rest.to_string(),
+        }),
+        "myname" => Err("give your name, e.g. /trip myname Alex".to_string()),
         "rename" if !rest.is_empty() => Ok(TripCommand::Rename {
             name: rest.to_string(),
         }),
-        "rename" => Err("give your name, e.g. /trip rename Alex".to_string()),
+        "rename" => Err("give the trip's new name, e.g. /trip rename Goa 2026".to_string()),
         other => Err(format!("unknown /trip command `{other}`")),
     }
 }
@@ -579,12 +587,20 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_trip("rename Alex Kim"),
-            Ok(TripCommand::Rename {
+            parse_trip("myname Alex Kim"),
+            Ok(TripCommand::MyName {
                 name: "Alex Kim".into()
             })
         );
+        assert_eq!(
+            parse_trip("rename Goa 2026"),
+            Ok(TripCommand::Rename {
+                name: "Goa 2026".into()
+            })
+        );
         assert!(parse_trip("nick").is_err());
+        assert!(parse_trip("myname").is_err());
+        assert!(parse_trip("rename").is_err());
         assert_eq!(parse_trip("reopen"), Ok(TripCommand::Reopen));
         assert!(parse_trip("add").is_err());
         assert!(parse_trip("new").is_err());
