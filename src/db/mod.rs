@@ -3,6 +3,7 @@
 
 pub mod entities;
 pub mod repositories;
+pub mod types;
 
 use migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};

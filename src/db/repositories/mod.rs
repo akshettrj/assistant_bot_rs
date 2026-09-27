@@ -5,6 +5,9 @@
 //! both on a plain connection and inside a transaction.
 
 pub mod chats;
+pub mod drafts;
+pub mod entries;
+pub mod trips;
 pub mod users;
 
 use sea_orm::DbErr;
