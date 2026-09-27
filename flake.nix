@@ -65,5 +65,8 @@
         ];
       };
     }
-  );
+  ) // {
+    # `services.assistant-bot`: the bot as a systemd service.
+    nixosModules.default = import ./nix/module.nix self;
+  };
 }

@@ -16,6 +16,35 @@ cargo run                         # migrate the database and start the bot
 Send `/id` to the bot to find the user and chat ids to put in the config, and
 `/config` (as the owner) to change settings without restarting.
 
+## NixOS
+
+The flake's `nixosModules.default` runs the bot as the `assistant-bot`
+systemd service, with its database in `/var/lib/assistant-bot`:
+
+```nix
+# flake.nix: inputs.assistant_bot.url = "github:akshettrj/assistant_bot_rs";
+imports = [ inputs.assistant_bot.nixosModules.default ];
+
+services.assistant-bot = {
+  enable = true;
+  # config.toml, as Nix: see config.example.toml.
+  settings = {
+    telegram.owner_id = 123456789;
+    telegram.error_logs_chat_id = -1001234567890;
+  };
+  # ASSISTANT_TELEGRAM__BOT_TOKEN=..., ASSISTANT_AI__OAUTH_TOKEN=...: kept
+  # out of the Nix store, which anyone on the machine can read.
+  environmentFile = "/etc/secrets/assistant-bot.env";
+  claudePackage = pkgs.claude-code; # for the AI (unfree)
+  openLightsFirewall = true; # UDP 6666, 6667, 7000 for finding bulbs
+};
+```
+
+`assistant-bot <command>` runs the command line as the service would (e.g.
+`assistant-bot settings list`, `assistant-bot check-config`). To move an
+existing bot over, stop it and copy its SQLite file to
+`/var/lib/assistant-bot/assistant_bot.sqlite`, owned by `assistant-bot`.
+
 ## Command line
 
 ```
