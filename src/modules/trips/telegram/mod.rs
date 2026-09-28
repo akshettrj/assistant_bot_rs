@@ -154,7 +154,7 @@ pub async fn handle_command(
         Command::Balance => panel::balance(&bot, &ctx, &msg).await,
         Command::Settle(args) => panel::settle(&bot, &ctx, &state, &msg, &user, &args).await,
         Command::Export => panel::export_command(&bot, &ctx, &msg).await,
-        Command::Ai(args) => messages::read(&bot, &ctx, &state, &msg, &user, &args, None).await,
+        Command::Ai(args) => messages::read(&bot, &ctx, &state, &msg, &user, &args).await,
         Command::Ask(args) => questions::ask(&bot, &ctx, &msg, &user, &args).await,
     }
 }

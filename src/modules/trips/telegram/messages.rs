@@ -75,7 +75,7 @@ pub async fn read_keyword(
     let Some(user) = msg.from.clone() else {
         return Ok(());
     };
-    read(&bot, &ctx, &state, &msg, &user, &text, None).await
+    read(&bot, &ctx, &state, &msg, &user, &text).await
 }
 
 /// The largest image sent to the AI.
@@ -183,45 +183,26 @@ fn caption_author(caption: &Caption, trip: &TripView, sender: &User) -> Option<S
     }
 }
 
-/// The caption's text after `/ai` (or the keyword), when `msg` is an image
-/// sent for the AI to read by someone who may use it.
-pub fn photo_request(msg: Message, me: Me, ctx: Arc<AppContext>) -> Option<String> {
+/// The caption's text after the keyword, when `msg` is an image sent for the
+/// AI to read by someone who may use it. (An image captioned `/ai …` is a
+/// command: teloxide reads captions as commands too.)
+pub fn photo_request(msg: Message, ctx: Arc<AppContext>) -> Option<String> {
     let user = msg.from.as_ref()?;
     if user.is_bot || ctx.ai.is_none() {
         return None;
     }
     photo_of(&msg)?;
     let caption = msg.caption()?;
-    let text = strip_command(caption, me.username()).or_else(|| {
-        let keyword = current_settings(&ctx).ai_keyword?;
-        if caption.trim().eq_ignore_ascii_case(&keyword) {
-            return Some(String::new());
-        }
-        strip_keyword(caption, &keyword).map(str::to_string)
-    })?;
+    let keyword = current_settings(&ctx).ai_keyword?;
+    let text = if caption.trim().eq_ignore_ascii_case(&keyword) {
+        String::new()
+    } else {
+        strip_keyword(caption, &keyword)?.to_string()
+    };
     ai::may_use(&ctx.settings.current(), user.id).then_some(text)
 }
 
-/// `text` after a leading `/ai` or `/ai@username`.
-fn strip_command(text: &str, username: &str) -> Option<String> {
-    let rest = text.trim_start().strip_prefix("/ai")?;
-    let rest = match rest.strip_prefix('@') {
-        Some(addressed) => {
-            let (name, rest) = addressed
-                .split_once(char::is_whitespace)
-                .unwrap_or((addressed, ""));
-            if !name.eq_ignore_ascii_case(username) {
-                return None;
-            }
-            rest
-        }
-        None if rest.is_empty() || rest.starts_with(char::is_whitespace) => rest,
-        None => return None,
-    };
-    Some(rest.trim().to_string())
-}
-
-/// An image sent with `/ai` (or the keyword) as its caption.
+/// An image with the keyword as its caption.
 pub async fn read_photo(
     bot: AssistantBot,
     msg: Message,
@@ -232,8 +213,7 @@ pub async fn read_photo(
     let Some(user) = msg.from.clone() else {
         return Ok(());
     };
-    let photo = photo_of(&msg);
-    read(&bot, &ctx, &state, &msg, &user, &text, photo).await
+    read(&bot, &ctx, &state, &msg, &user, &text).await
 }
 
 /// Downloads an image for the AI.
@@ -272,10 +252,17 @@ pub(super) fn llm_for(ctx: &AppContext, user: &User) -> Result<Arc<dyn Llm>, &'s
     }
 }
 
-/// Reads `text` (and `photo`, or the photo it replies to) into draft cards,
-/// shown in place of a "Reading…" placeholder; or, in reply to a draft's
-/// card, corrects that draft.
-#[allow(clippy::too_many_arguments)] // The handler's context, and what to read.
+/// The image to read with `msg`: its own (its caption being the message),
+/// else the one it replies to, with that one's caption.
+fn photo_to_read(msg: &Message) -> Option<(Photo, Option<Caption>)> {
+    photo_of(msg)
+        .map(|photo| (photo, None))
+        .or_else(|| replied_photo(msg))
+}
+
+/// Reads `text` (and the image of `msg`, or the one it replies to) into draft
+/// cards, shown in place of a "Reading…" placeholder; or, in reply to a
+/// draft's card, corrects that draft.
 pub async fn read(
     bot: &AssistantBot,
     ctx: &AppContext,
@@ -283,25 +270,21 @@ pub async fn read(
     msg: &Message,
     user: &User,
     text: &str,
-    photo: Option<Photo>,
 ) -> HandlerResult {
     let llm = match llm_for(ctx, user) {
         Ok(llm) => llm,
         Err(problem) => return reply(bot, msg, escape(problem)).await,
     };
     let text = text.trim();
-    let replied = msg.reply_to_message();
-    if photo.is_none()
+    if photo_of(msg).is_none()
         && !text.is_empty()
-        && let Some(card) = replied
+        && let Some(card) = msg.reply_to_message()
         && let Some(stored) = service::find_draft_by_card(&ctx.db, msg.chat.id, card.id).await?
     {
         return correct(bot, ctx, state, msg, user, stored, card.id, text).await;
     }
-    let (photo, caption) = match photo {
-        Some(photo) => (Some(photo), None),
-        None => replied_photo(msg).map_or((None, None), |(photo, caption)| (Some(photo), caption)),
-    };
+    let (photo, caption) = photo_to_read(msg).unzip();
+    let caption = caption.flatten();
     // A question (without an image to read) is for the queries.
     if photo.is_none() && ask::looks_like_question(text) {
         return questions::ask(bot, ctx, msg, user, text).await;
@@ -500,17 +483,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn captions_start_with_ai_or_ai_at_the_bot() {
-        let strip = |caption| strip_command(caption, "TripBot");
-        assert_eq!(strip("/ai lunch, I paid"), Some("lunch, I paid".into()));
-        assert_eq!(strip("/ai"), Some(String::new()));
-        assert_eq!(
-            strip("/ai@tripbot split with Bob"),
-            Some("split with Bob".into())
-        );
-        assert_eq!(strip("/ai@otherbot split"), None);
-        assert_eq!(strip("/aid 20"), None);
-        assert_eq!(strip("lunch"), None);
+    fn an_image_captioned_with_ai_is_read_with_its_caption() {
+        // teloxide hands such a message to the /ai command, with the caption
+        // as its text: the image must still be read.
+        let chat = serde_json::json!({"id": -100, "type": "group", "title": "Goa"});
+        let captioned = message(serde_json::json!({
+            "message_id": 1, "date": 0, "chat": chat, "from": user(1, "Ann"),
+            "photo": sizes(), "caption": "/ai first two by Alex, rest by Erin. Paid by Dave"
+        }));
+        let (photo, caption) = photo_to_read(&captioned).unwrap();
+        assert_eq!(photo.file.0, "large");
+        // Its caption is the message itself, not a caption to quote.
+        assert!(caption.is_none());
+
+        // Its own image comes before the one it replies to.
+        let both = message(serde_json::json!({
+            "message_id": 3, "date": 0, "chat": chat, "from": user(1, "Ann"),
+            "photo": [{"file_id": "own", "file_unique_id": "own", "width": 1, "height": 1,
+                       "file_size": 1}],
+            "caption": "/ai",
+            "reply_to_message": {
+                "message_id": 2, "date": 0, "chat": chat, "from": user(2, "Bob"),
+                "photo": sizes()
+            }
+        }));
+        assert_eq!(photo_to_read(&both).unwrap().0.file.0, "own");
+
+        let text = message(serde_json::json!({
+            "message_id": 4, "date": 0, "chat": chat, "from": user(1, "Ann"),
+            "text": "/ai dinner 2400"
+        }));
+        assert!(photo_to_read(&text).is_none());
     }
 
     fn message(json: serde_json::Value) -> Message {
