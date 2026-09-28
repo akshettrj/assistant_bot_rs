@@ -249,7 +249,7 @@ Groups: {{"who": "everyone"}}, {{"who": "only", "names": [...]}}, {{"who": "exce
 
 If the message doesn't say who paid, "{ME}" paid: a paid claim with {{"kind": "rest"}}. For a settlement, the one paying back is "paid" and the one receiving has a "share" of kind "rest".
 
-Other fields: "description", a few words ("dinner at the beach"); "category", the closest of {categories}, or other; "currency", the ISO 4217 code if the message names or shows one ("$" is USD, "€" EUR, "₹" or "rs" INR), else null (the trip's currency is {base}); "rate", an exchange rate if given ("at 84" is "84"), else null; "date", as written ("yesterday", "friday", "20 Sep"), or null for today; "unclear", the parts of the message about the entry that the claims can't express. "transcript" is null: there is no photo.
+Other fields: "description", a few words ("dinner at the beach"); "category", the closest of {categories}, or other; "currency", the ISO 4217 code if the message names or shows one ("$" is USD, "€" EUR, "₹" or "rs" INR, "¥" JPY), else null (the trip's currency is {base}); "rate", an exchange rate if given ("at 84" is "84"), else null; "date", as written ("yesterday", "friday", "20 Sep"), or null for today; "unclear", the parts of the message about the entry that the claims can't express. "transcript" is null: there is no photo.
 
 Examples (fields left out are null):
 - "Carol paid 50, I paid 90, Dave's total was 30, Erin's was the rest": paid Carol number "50"; paid me number "90"; share Dave number "30"; share Erin rest.
@@ -675,9 +675,29 @@ pub fn photo_instructions(trip: &TripView, sender: &Member, categories: &[Catego
          line, exactly as printed (numbers included, character for character). Then read the \
          entries from the photo and the message together: each thing bought is an item (its label \
          and amount as printed; for everyone unless the message says who had it); the printed \
-         total is a total claim; tax, service charge and tip lines are extras with the amount as \
-         printed. Numbers must be copied from the photo or the message, never worked out: if \
-         something isn't printed, use \"rest\" or leave it out.",
+         total, what was due (\"TOTAL\", \"Grand total\", 合計), is a total claim; tax, service \
+         charge and tip lines added on top of the items are extras with the amount as printed. \
+         Numbers must be copied from the photo or the message, never worked out: if something \
+         isn't printed, use \"rest\" or leave it out.\n\nNot every printed line is an item or an \
+         extra. Subtotals (\"Subtotal\", 小計), a tax already included in the prices (\"incl. \
+         tax\", \"of which VAT\", 内消費税), lines restating a tax or what it applies to, the \
+         cash handed over and the change (\"Cash\", \"Change\", お預り, お釣), card slips and \
+         loyalty points are none of them, and never a payment: someone paid the total. Count each \
+         tax once, even when printed twice. A mark beside a price isn't part of it: \"*100\" or \
+         \"100 T\" is \"100\". The bill's currency sign gives the currency (\"¥\" or \"円\" is \
+         JPY), and its printed date is the entry's (as YYYY-MM-DD) unless the message gives \
+         one.\n\nWho had what goes by the bill's own lines. Give one item claim per line, in the \
+         order printed, with the line's amount (what the line comes to, not a unit price). When \
+         the message hands out lines by position (\"the first two items were Carol's, the next \
+         four Dave's, the rest Erin's\"), count only the item lines, in the order printed (not \
+         tax, service, discount or total lines), and give each item \"only\" [whoever had it]; a \
+         line two people shared is \"only\" [both]. For \"the rest\" or \"everything else\", also \
+         add a remainder claim \"only\" [that person], so that anything left over is theirs too. \
+         Lines the message doesn't give anyone are for everyone.\n\nExample: a bill of six items, \
+         a service charge and a total, with \"first two mine, next three Carol's, the rest \
+         Erin's; Dave paid for all\": items one and two \"only\" [me]; items three to five \
+         \"only\" [Carol]; item six \"only\" [Erin]; remainder \"only\" [Erin]; extra \"service\" \
+         as printed, proportional; total as printed; paid Dave rest.",
         instructions(trip, sender, categories)
     )
 }
@@ -916,8 +936,8 @@ mod tests {
 
     #[test]
     fn an_itemised_bill_with_service_and_people_left_out() {
-        let message = "pizza 300 for me, Carol's pasta 400, a 200 starter for all but Erin, \
-                       plus 10% service; I paid";
+        let message = "pizza 300 for me, Carol's pasta 400, a 200 starter for all but Erin, plus \
+                       10% service; I paid";
         let draft = one(
             json!({"entries": [entry(vec![
                 with(claim("item"), json!({"label": "pizza", "amount": number("300"), "group": {"who": "only", "names": ["me"]}})),
@@ -1124,6 +1144,164 @@ mod tests {
     }
 
     #[test]
+    fn a_bills_lines_are_handed_out_by_position() {
+        // "first two items bought by Carol, then 4 by Dave, and the rest by
+        // Erin, and I paid for all", with a bill of seven items.
+        let trip = goa();
+        let categories = model::categories(&TripsSettings::default());
+        let only = |name: &str| json!({"who": "only", "names": [name]});
+        let item = |label: &str, amount: &str, name: &str| {
+            with(
+                claim("item"),
+                json!({"label": label, "amount": number(amount), "group": only(name)}),
+            )
+        };
+        let reading: Reading = serde_json::from_value(json!({
+            "transcript": "CAFE GOA\nPizza 300.00\nPasta 250.00\nBeer 200.00\nBeer \
+                           200.00\nFries 120.00\nSalad 180.00\nTiramisu 150.00\nService 5% \
+                           70.00\nTOTAL 1470.00",
+            "entries": [entry(vec![
+                item("Pizza", "300.00", "Carol"),
+                item("Pasta", "250.00", "Carol"),
+                item("Beer", "200.00", "Dave"),
+                item("Beer", "200.00", "Dave"),
+                item("Fries", "120.00", "Dave"),
+                item("Salad", "180.00", "Dave"),
+                item("Tiramisu", "150.00", "Erin"),
+                with(claim("remainder"), json!({"group": only("Erin")})),
+                with(claim("extra"), json!({"label": "service", "amount": number("70.00"), "spread": "proportional"})),
+                with(claim("total"), json!({"amount": number("1470.00")})),
+                with(claim("paid"), json!({"person": "me", "amount": {"kind": "rest", "value": null, "of": null}})),
+            ])],
+        }))
+        .unwrap();
+        let sources = Sources {
+            message: "first two items bought by Carol, then 4 by Dave, and the rest by Erin, and \
+                      I paid for all",
+            card: None,
+            photo: reading.transcript.as_deref(),
+        };
+        let draft = to_drafts(
+            &reading,
+            sources,
+            &trip,
+            &trip.members[0],
+            &categories,
+            today(),
+        )
+        .unwrap()
+        .remove(0)
+        .unwrap();
+        // The service charge follows what each had: 550, 700 and 150 of 1,400.
+        assert_eq!(
+            owed(&draft),
+            [(2, dec!(577.50)), (3, dec!(735.00)), (4, dec!(157.50))]
+        );
+
+        // A line the model missed (here, the tiramisu) is still Erin's.
+        let mut missed = reading.clone();
+        missed.entries[0].claims.remove(6);
+        let draft = to_drafts(
+            &missed,
+            sources,
+            &trip,
+            &trip.members[0],
+            &categories,
+            today(),
+        )
+        .unwrap()
+        .remove(0)
+        .unwrap();
+        assert_eq!(
+            owed(&draft),
+            [(2, dec!(577.50)), (3, dec!(735.00)), (4, dec!(157.50))]
+        );
+    }
+
+    #[test]
+    fn a_japanese_receipt_with_tax_by_rate() {
+        // A 7-Eleven receipt: prices before tax, marked * for the reduced 8%
+        // rate, then each rate's tax, the total, the cash handed over and the
+        // change. "first two by Carol, the next two by Dave, the rest by
+        // Erin; I paid".
+        let trip = goa();
+        let categories = model::categories(&TripsSettings::default());
+        let only = |name: &str| json!({"who": "only", "names": [name]});
+        let item = |label: &str, amount: &str, name: &str| {
+            with(
+                claim("item"),
+                json!({"label": label, "amount": number(amount), "group": only(name)}),
+            )
+        };
+        let extra = |label: &str, amount: &str| {
+            with(
+                claim("extra"),
+                json!({"label": label, "amount": number(amount), "spread": "proportional"}),
+            )
+        };
+        let transcript =
+            "セブン-イレブン 北青山青山通り店\n2025年05月28日(水) \
+             18:59\n領収書\n7Pゆずれもんサイダー500ml *100\nポカリスエットペット500ml \
+             *160\nマッキー極細 黒 111\nハムとたまごのサンド *310\nたまごサンド *230\nイロハス \
+             天然水 2L *131\n小計(税抜 8%) ¥931\n消費税等(8%) ¥74\n小計(税抜10%) \
+             ¥111\n消費税等(10%) ¥11\n合計 ¥1,127\n(税率8%対象 ¥1,005)\n(税率10%対象 \
+             ¥122)\n(内消費税等 8% ¥74)\n(内消費税等10% ¥11)\nお預り ¥2,000\nお釣 ¥873";
+        let mut entry = entry(vec![
+            item("7Pゆずれもんサイダー500ml", "100", "Carol"),
+            item("ポカリスエットペット500ml", "160", "Carol"),
+            item("マッキー極細 黒", "111", "Dave"),
+            item("ハムとたまごのサンド", "310", "Dave"),
+            item("たまごサンド", "230", "Erin"),
+            item("イロハス 天然水 2L", "131", "Erin"),
+            with(claim("remainder"), json!({"group": only("Erin")})),
+            extra("消費税等(8%)", "74"),
+            extra("消費税等(10%)", "11"),
+            with(claim("total"), json!({"amount": number("1,127")})),
+            with(
+                claim("paid"),
+                json!({"person": "me", "amount": {"kind": "rest", "value": null, "of": null}}),
+            ),
+        ]);
+        entry["currency"] = json!("JPY");
+        entry["date"] = json!("2025-05-28");
+        let reading: Reading =
+            serde_json::from_value(json!({"transcript": transcript, "entries": [entry]})).unwrap();
+        let sources = Sources {
+            message: "first two by Carol, the next two by Dave, the rest by Erin; I paid",
+            card: None,
+            photo: reading.transcript.as_deref(),
+        };
+        let draft = to_drafts(
+            &reading,
+            sources,
+            &trip,
+            &trip.members[0],
+            &categories,
+            today(),
+        )
+        .unwrap()
+        .remove(0)
+        .unwrap();
+        assert_eq!(draft.currency, Currency::from_code("JPY").unwrap());
+        assert_eq!(
+            draft.date,
+            DateSpec::On(NaiveDate::from_ymd_opt(2025, 5, 28).unwrap())
+        );
+
+        // In yen, whole: each tax follows what each had (260, 421 and 361).
+        let solution =
+            super::super::claims::solve(&draft.claims, &[1, 2, 3, 4], draft.currency).unwrap();
+        let owed: Vec<(MemberId, Decimal)> = solution
+            .owed
+            .iter()
+            .map(|(member, amount)| (*member, amount.amount()))
+            .collect();
+        assert_eq!(owed, [(2, dec!(281)), (3, dec!(455)), (4, dec!(391))]);
+        assert_eq!(solution.paid[0].member, 1);
+        assert_eq!(solution.paid[0].amount.amount(), dec!(1127));
+    }
+
+    #[test]
     fn the_schema_and_instructions() {
         let categories = model::categories(&TripsSettings::default());
         let schema = schema(&categories);
@@ -1137,10 +1315,7 @@ mod tests {
         let mut trip = goa();
         trip.members[3].nicknames = vec!["Rinny".into()];
         let text = instructions(&trip, &trip.members[0], &categories);
-        assert!(
-            text.contains("Carol, Dave, Erin (also Rinny)"),
-            "{text}"
-        );
+        assert!(text.contains("Carol, Dave, Erin (also Rinny)"), "{text}");
         assert!(text.contains("You never calculate"), "{text}");
         assert!(
             text.contains("their own names on the trip, Frank."),
