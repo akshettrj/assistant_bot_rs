@@ -678,26 +678,30 @@ pub fn photo_instructions(trip: &TripView, sender: &Member, categories: &[Catego
          total, what was due (\"TOTAL\", \"Grand total\", 合計), is a total claim; tax, service \
          charge and tip lines added on top of the items are extras with the amount as printed. \
          Numbers must be copied from the photo or the message, never worked out: if something \
-         isn't printed, use \"rest\" or leave it out.\n\nNot every printed line is an item or an \
-         extra. Subtotals (\"Subtotal\", 小計), a tax already included in the prices (\"incl. \
-         tax\", \"of which VAT\", 内消費税), lines restating a tax or what it applies to, the \
-         cash handed over and the change (\"Cash\", \"Change\", お預り, お釣), card slips and \
-         loyalty points are none of them, and never a payment: someone paid the total. Count each \
-         tax once, even when printed twice. A mark beside a price isn't part of it: \"*100\" or \
-         \"100 T\" is \"100\". The bill's currency sign gives the currency (\"¥\" or \"円\" is \
-         JPY), and its printed date is the entry's (as YYYY-MM-DD) unless the message gives \
-         one.\n\nWho had what goes by the bill's own lines. Give one item claim per line, in the \
-         order printed, with the line's amount (what the line comes to, not a unit price). When \
-         the message hands out lines by position (\"the first two items were Carol's, the next \
-         four Dave's, the rest Erin's\"), count only the item lines, in the order printed (not \
-         tax, service, discount or total lines), and give each item \"only\" [whoever had it]; a \
-         line two people shared is \"only\" [both]. For \"the rest\" or \"everything else\", also \
-         add a remainder claim \"only\" [that person], so that anything left over is theirs too. \
-         Lines the message doesn't give anyone are for everyone.\n\nExample: a bill of six items, \
-         a service charge and a total, with \"first two mine, next three Carol's, the rest \
-         Erin's; Dave paid for all\": items one and two \"only\" [me]; items three to five \
-         \"only\" [Carol]; item six \"only\" [Erin]; remainder \"only\" [Erin]; extra \"service\" \
-         as printed, proportional; total as printed; paid Dave rest.",
+         isn't printed, use \"rest\" or leave it out.\n\nThe transcript stays as printed, in the \
+         bill's language. An item's or an extra's label is as printed too, then, when it isn't in \
+         English, an English translation in brackets: \"たまごサンド (egg sandwich)\", \
+         \"消費税等(8%) (consumption tax 8%)\". The entry's description is in English (\"7-Eleven \
+         snacks\").\n\nNot every printed line is an item or an extra. Subtotals (\"Subtotal\", \
+         小計), a tax already included in the prices (\"incl. tax\", \"of which VAT\", 内消費税), \
+         lines restating a tax or what it applies to, the cash handed over and the change \
+         (\"Cash\", \"Change\", お預り, お釣), card slips and loyalty points are none of them, \
+         and never a payment: someone paid the total. Count each tax once, even when printed \
+         twice. A mark beside a price isn't part of it: \"*100\" or \"100 T\" is \"100\". The \
+         bill's currency sign gives the currency (\"¥\" or \"円\" is JPY), and its printed date \
+         is the entry's (as YYYY-MM-DD) unless the message gives one.\n\nWho had what goes by the \
+         bill's own lines. Give one item claim per line, in the order printed, with the line's \
+         amount (what the line comes to, not a unit price). When the message hands out lines by \
+         position (\"the first two items were Carol's, the next four Dave's, the rest Erin's\"), \
+         count only the item lines, in the order printed (not tax, service, discount or total \
+         lines), and give each item \"only\" [whoever had it]; a line two people shared is \
+         \"only\" [both]. For \"the rest\" or \"everything else\", also add a remainder claim \
+         \"only\" [that person], so that anything left over is theirs too. Lines the message \
+         doesn't give anyone are for everyone.\n\nExample: a bill of six items, a service charge \
+         and a total, with \"first two mine, next three Carol's, the rest Erin's; Dave paid for \
+         all\": items one and two \"only\" [me]; items three to five \"only\" [Carol]; item six \
+         \"only\" [Erin]; remainder \"only\" [Erin]; extra \"service\" as printed, proportional; \
+         total as printed; paid Dave rest.",
         instructions(trip, sender, categories)
     )
 }
@@ -1247,15 +1251,31 @@ mod tests {
              ¥111\n消費税等(10%) ¥11\n合計 ¥1,127\n(税率8%対象 ¥1,005)\n(税率10%対象 \
              ¥122)\n(内消費税等 8% ¥74)\n(内消費税等10% ¥11)\nお預り ¥2,000\nお釣 ¥873";
         let mut entry = entry(vec![
-            item("7Pゆずれもんサイダー500ml", "100", "Carol"),
-            item("ポカリスエットペット500ml", "160", "Carol"),
-            item("マッキー極細 黒", "111", "Dave"),
-            item("ハムとたまごのサンド", "310", "Dave"),
-            item("たまごサンド", "230", "Erin"),
-            item("イロハス 天然水 2L", "131", "Erin"),
+            item(
+                "7Pゆずれもんサイダー500ml (yuzu lemon cider 500ml)",
+                "100",
+                "Carol",
+            ),
+            item(
+                "ポカリスエットペット500ml (Pocari Sweat 500ml)",
+                "160",
+                "Carol",
+            ),
+            item(
+                "マッキー極細 黒 (Mackee marker, extra fine, black)",
+                "111",
+                "Dave",
+            ),
+            item("ハムとたまごのサンド (ham and egg sandwich)", "310", "Dave"),
+            item("たまごサンド (egg sandwich)", "230", "Erin"),
+            item(
+                "イロハス 天然水 2L (I LOHAS mineral water 2L)",
+                "131",
+                "Erin",
+            ),
             with(claim("remainder"), json!({"group": only("Erin")})),
-            extra("消費税等(8%)", "74"),
-            extra("消費税等(10%)", "11"),
+            extra("消費税等(8%) (consumption tax 8%)", "74"),
+            extra("消費税等(10%) (consumption tax 10%)", "11"),
             with(claim("total"), json!({"amount": number("1,127")})),
             with(
                 claim("paid"),
@@ -1323,6 +1343,10 @@ mod tests {
         );
         let photo = photo_instructions(&trip, &trip.members[0], &categories);
         assert!(photo.contains("everything printed on the photo"), "{photo}");
+        assert!(
+            photo.contains("an English translation in brackets"),
+            "{photo}"
+        );
         assert!(!text.contains("{ME}"), "{text}");
     }
 }
