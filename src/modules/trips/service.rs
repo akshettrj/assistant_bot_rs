@@ -225,6 +225,67 @@ pub async fn add_person(
         .into())
 }
 
+/// How a Telegram user came onto a trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Added {
+    /// As a new member.
+    New,
+    /// As a member added before by name, without Telegram.
+    Linked,
+}
+
+/// Adds the Telegram `user` (whose first name is `first_name`) to the trip;
+/// only its creator may. Given the `name` of a member without Telegram
+/// (someone added by name before), links them; else they go by `name`, or by
+/// their first name (or a variant of it, if taken).
+pub async fn add_user(
+    db: &DatabaseConnection,
+    trip: &TripView,
+    by: UserId,
+    user: UserId,
+    first_name: &str,
+    name: Option<&str>,
+) -> Result<(Member, Added)> {
+    require_creator(trip, by)?;
+    if let Some(member) = trip.member_of(user) {
+        return Err(TripsError::Invalid(format!(
+            "{} is already on {}",
+            member.name, trip.trip.name
+        )));
+    }
+    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        let name = unique_name(trip, first_name);
+        let member = trips::add_member(db, trip.trip.id, &name, Some(user)).await?;
+        return Ok((member.into(), Added::New));
+    };
+    let lowercase = name.to_lowercase();
+    let called = trip.members.iter().find(|member| {
+        member
+            .names()
+            .any(|called| called.to_lowercase() == lowercase)
+    });
+    match called {
+        Some(member) if member.user.is_none() => {
+            trips::link_member(db, member.id, Some(user)).await?;
+            let linked = Member {
+                user: Some(user),
+                ..member.clone()
+            };
+            Ok((linked, Added::Linked))
+        }
+        Some(_) => Err(TripsError::NameTaken(name.to_string())),
+        None => {
+            if name.chars().count() > MAX_NAME {
+                return Err(TripsError::Invalid(format!(
+                    "a name has 1 to {MAX_NAME} characters"
+                )));
+            }
+            let member = trips::add_member(db, trip.trip.id, name, Some(user)).await?;
+            Ok((member.into(), Added::New))
+        }
+    }
+}
+
 /// The longest name or nickname, to keep cards and buttons readable.
 const MAX_NAME: usize = 30;
 
@@ -1005,6 +1066,53 @@ mod tests {
         assert_eq!(trip.find_by_name("b").unwrap().name, "Bob");
         assert_eq!(trip.find_by_name("an"), None);
         assert_eq!(trip.find_by_name(""), None);
+    }
+
+    #[tokio::test]
+    async fn the_creator_adds_telegram_users_and_links_members_added_by_name() {
+        let db = memory_db().await;
+        let trip = goa(&db).await;
+        let carol = UserId(5);
+        assert!(matches!(
+            add_user(&db, &trip, BOB, carol, "Carol", None).await,
+            Err(TripsError::NotAllowed(_))
+        ));
+
+        // By their first name.
+        let (member, added) = add_user(&db, &trip, ANN, carol, "Carol", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (member.name.as_str(), member.user, added),
+            ("Carol", Some(carol), Added::New)
+        );
+        let trip = load(&db, trip.trip.id).await.unwrap();
+        assert!(matches!(
+            add_user(&db, &trip, ANN, carol, "Carol", None).await,
+            Err(TripsError::Invalid(_))
+        ));
+        // A first name that's taken gets a variant.
+        let (member, _) = add_user(&db, &trip, ANN, UserId(6), "Carol", None)
+            .await
+            .unwrap();
+        assert_eq!(member.name, "Carol 2");
+
+        // Named as someone added without Telegram: that's them.
+        let trip = load(&db, trip.trip.id).await.unwrap();
+        let mom = trip.find_by_name("Mom").unwrap().id;
+        let (member, added) = add_user(&db, &trip, ANN, UserId(7), "Mary", Some("mom"))
+            .await
+            .unwrap();
+        assert_eq!((member.id, added), (mom, Added::Linked));
+        let trip = load(&db, trip.trip.id).await.unwrap();
+        assert_eq!(trip.member(mom).unwrap().user, Some(UserId(7)));
+        assert_eq!(trip.members.len(), 5);
+
+        // Named as someone with Telegram: taken.
+        assert!(matches!(
+            add_user(&db, &trip, ANN, UserId(8), "Dave", Some("Bob")).await,
+            Err(TripsError::NameTaken(_))
+        ));
     }
 
     #[tokio::test]

@@ -50,6 +50,8 @@ pub enum Page {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Person,
+    /// Someone with Telegram.
+    User,
     Rate,
     Nickname,
 }
@@ -58,6 +60,9 @@ impl Field {
     pub fn question(self, base: Currency) -> String {
         match self {
             Self::Person => "Who should be added? Send their name.".to_string(),
+            Self::User => "Who should be added? Send their @username or mention them, or share \
+                           their contact (📎 → Contact). A name may follow: @bob Robert."
+                .to_string(),
             Self::Rate => {
                 format!("Send a currency and how much {base} one unit costs, e.g. USD 83.25")
             }
@@ -68,6 +73,7 @@ impl Field {
     pub fn placeholder(self) -> &'static str {
         match self {
             Self::Person => "Mom",
+            Self::User => "@bob",
             Self::Rate => "USD 83.25",
             Self::Nickname => "Erin Rinny",
         }
@@ -118,6 +124,7 @@ impl Action {
             Self::RemoveRate(currency) => format!("rr:{currency}"),
             Self::RemoveNickname(member, index) => format!("nx:{member}:{index}"),
             Self::Ask(Field::Person) => "a:person".to_string(),
+            Self::Ask(Field::User) => "a:user".to_string(),
             Self::Ask(Field::Rate) => "a:rate".to_string(),
             Self::Ask(Field::Nickname) => "a:nick".to_string(),
             Self::Show(Page::Summary) => "sum".to_string(),
@@ -158,6 +165,7 @@ impl Action {
             "csv" => Self::Export,
             "a" => match next()? {
                 "person" => Self::Ask(Field::Person),
+                "user" => Self::Ask(Field::User),
                 "rate" => Self::Ask(Field::Rate),
                 "nick" => Self::Ask(Field::Nickname),
                 _ => return None,
@@ -554,7 +562,10 @@ pub fn people(trip: &TripView) -> Rendered {
         }
         lines.push(escape(&line));
     }
-    lines.push(escape("\nOthers join with /trip join in the trip's chat."));
+    lines.push(escape(
+        "\nOthers join with /trip join in the trip's chat, or its creator adds them: /trip add \
+         @username, or /trip add in reply to one of their messages.",
+    ));
     let forget: Vec<_> = trip
         .members
         .iter()
@@ -576,6 +587,7 @@ pub fn people(trip: &TripView) -> Rendered {
     keyboard.extend(rows(
         vec![
             button(id, "✍️ Add a nickname…", &Action::Ask(Field::Nickname)),
+            button(id, "➕ Add a Telegram user…", &Action::Ask(Field::User)),
             button(
                 id,
                 "✍️ Add someone without Telegram…",
@@ -754,6 +766,7 @@ mod tests {
             Action::Restore(5),
             Action::RemoveRate(inr()),
             Action::Ask(Field::Person),
+            Action::Ask(Field::User),
             Action::Ask(Field::Rate),
             Action::Ask(Field::Nickname),
             Action::RemoveNickname(12, 3),

@@ -15,12 +15,14 @@ use super::{
 pub const TRIP_USAGE: &str =
     "/trip — this chat's trip: balances, entries, people, rates\n/trip new <name> [currency] — \
      start a trip here, e.g. /trip new Goa INR\n/trip join [name] — join this chat's trip\n/trip \
-     add <name> — add someone without Telegram (the trip's creator)\n/trip myname <name> — your \
-     name on the trip · /trip nick <name> — another name you go by\n/trip rename <name> — rename \
-     the trip · /trip end, /trip reopen — end the trip with a summary, or reopen it (the trip's \
-     creator)\n/spent 2400 dinner or /ai dinner 2400 split with Bob — log an expense · /balance — \
-     who owes whom · /settle — settle up · /export — a CSV file\n/ask how much on food? — ask the \
-     AI about the spending · /trip story — the trip told by the AI";
+     add @username [name] (or in reply to them) — add someone; /trip add <name> — someone without \
+     Telegram (the trip's creator)\n/trip myname <name> — your name on the trip · /trip nick \
+     <name> — another name you go by; /trip nick @username <name> (or in reply) — someone \
+     else's\n/trip rename <name> — rename the trip · /trip end, /trip reopen — end the trip with \
+     a summary, or reopen it (the trip's creator)\n/spent 2400 dinner or /ai dinner 2400 split \
+     with Bob — log an expense · /balance — who owes whom · /settle — settle up · /export — a CSV \
+     file\n/ask how much on food? — ask the AI about the spending · /trip story — the trip told \
+     by the AI";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
@@ -37,6 +39,8 @@ pub enum TripCommand {
     Join {
         name: Option<String>,
     },
+    /// Someone with Telegram (named by a mention or a reply), or a name alone
+    /// for someone without; see `telegram::people`.
     Add {
         name: String,
     },
@@ -44,7 +48,8 @@ pub enum TripCommand {
     /// Ends the trip, posting its summary.
     End,
     Reopen,
-    /// Another name the sender goes by.
+    /// Another name the sender (or someone named by a mention or a reply, or
+    /// as `Erin: Rinny`) goes by.
     Nick {
         nickname: String,
     },
@@ -90,10 +95,10 @@ pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
         "join" => Ok(TripCommand::Join {
             name: (!rest.is_empty()).then(|| rest.to_string()),
         }),
-        "add" if !rest.is_empty() => Ok(TripCommand::Add {
+        // Alone, in reply to someone's message.
+        "add" => Ok(TripCommand::Add {
             name: rest.to_string(),
         }),
-        "add" => Err("name who to add, e.g. /trip add Mom".to_string()),
         "nick" if !rest.is_empty() => Ok(TripCommand::Nick {
             nickname: rest.to_string(),
         }),
@@ -607,7 +612,12 @@ mod tests {
         assert!(parse_trip("rename").is_err());
         assert_eq!(parse_trip("reopen"), Ok(TripCommand::Reopen));
         assert_eq!(parse_trip("Story"), Ok(TripCommand::Story));
-        assert!(parse_trip("add").is_err());
+        assert_eq!(
+            parse_trip("add"),
+            Ok(TripCommand::Add {
+                name: String::new()
+            })
+        );
         assert!(parse_trip("new").is_err());
         assert!(parse_trip("fly").is_err());
     }

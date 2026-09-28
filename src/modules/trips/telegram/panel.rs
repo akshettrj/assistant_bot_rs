@@ -109,21 +109,9 @@ pub async fn trip(
             }
             .await
         }
-        TripCommand::Nick { nickname } => {
-            async {
-                let trip = service::require_active(db, chat).await?;
-                let me = trip
-                    .member_of(user.id)
-                    .ok_or_else(|| TripsError::NotAMember(trip.trip.name.clone()))?;
-                service::add_nickname(db, &trip, user.id, me.id, &nickname).await?;
-                Ok(escape(&format!(
-                    "👋 On {}, you're also {}",
-                    trip.trip.name,
-                    nickname.trim()
-                )))
-            }
+        TripCommand::Nick { nickname } => super::people::nick(ctx, msg, user, &nickname)
             .await
-        }
+            .map(|text| escape(&text)),
         TripCommand::Story => return super::story::tell(bot, ctx, msg, user).await,
         TripCommand::Rename { name } => {
             async {
@@ -152,17 +140,9 @@ pub async fn trip(
             }
             .await
         }
-        TripCommand::Add { name } => {
-            async {
-                let trip = service::require_active(db, chat).await?;
-                let member = service::add_person(db, &trip, user.id, &name).await?;
-                Ok(escape(&format!(
-                    "👋 Added {} to {}",
-                    member.name, trip.trip.name
-                )))
-            }
+        TripCommand::Add { name } => super::people::add(ctx, msg, user, &name)
             .await
-        }
+            .map(|text| escape(&text)),
     };
     match result {
         Ok(text) => reply(bot, msg, text).await,
@@ -526,6 +506,20 @@ pub async fn handle_input(
                 service::add_person(&ctx.db, &trip, user, text).await?;
                 Page::People
             }
+            Field::User => match super::people::named(&ctx.db, &msg, text).await {
+                Ok(Some(named)) => {
+                    let name = Some(named.rest.as_str()).filter(|rest| !rest.is_empty());
+                    service::add_user(&ctx.db, &trip, user, named.user, &named.first_name, name)
+                        .await?;
+                    Page::People
+                }
+                Ok(None) => {
+                    let problem = "send their @username or mention them, or share their contact";
+                    return Ok(Err(problem.to_string()));
+                }
+                Err(TripsError::Invalid(problem)) => return Ok(Err(problem)),
+                Err(error) => return Err(error),
+            },
             Field::Rate => match command::parse_rate(text) {
                 Ok((currency, rate)) => {
                     service::set_rate(&ctx.db, &trip, user, currency, rate).await?;

@@ -4,6 +4,7 @@
 pub mod drafts;
 pub mod messages;
 pub mod panel;
+pub mod people;
 pub mod questions;
 pub mod story;
 

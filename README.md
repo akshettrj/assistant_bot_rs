@@ -318,8 +318,11 @@ chat for a personal trip), and has one currency its balances are kept in.
 ```
 /trip new Goa INR              start a trip in this chat (you're on it)
 /trip join                     join this chat's trip
+/trip add @bob                 add someone with Telegram (the trip's creator); or /trip add
+                               in reply to one of their messages
 /trip add Mom                  add someone without Telegram (the trip's creator)
 /trip myname Alex              your name on the trip (/trip nick adds another)
+/trip nick @bob Bobby          someone else's nickname (or /trip nick Erin: Rinny)
 /trip rename Goa 2026          rename the trip (the trip's creator)
 /spent 2400 dinner             you paid, split equally with everyone
 /spent 30 USD taxi #transport  in another currency, with a category
@@ -335,10 +338,16 @@ amount, payers (several people can pay), split (equally among some, by shares,
 or exact amounts), category, date and currency, and is only saved when its
 author presses ✅. Saved entries can be edited or deleted (by whoever logged
 them, or the trip's creator) from the panel's entries; deletions keep a
-history and can be undone. Nicknames ("Rinny" for Erin), added from the
-panel's 👥 People, work wherever a name does, for the AI too. In a private
-chat, `/trip` switches between your
-trips, and expenses logged there are announced in the trip's chat
+history and can be undone.
+
+The trip's creator adds people with Telegram by their @username (if the bot has
+seen them), a mention, or `/trip add` in reply to one of their messages, and
+from the panel's 👥 People by sharing their contact too. A name after them
+sets their name on the trip; the name of someone added before without Telegram
+(`/trip add @mum Mom`) links that person to their account instead.
+Nicknames ("Rinny" for Erin), from `/trip nick` or the panel's 👥 People, work
+wherever a name does, for the AI too. In a private chat, `/trip` switches
+between your trips, and expenses logged there are announced in the trip's chat
 (`notify_home_chat`).
 
 Money is exact: amounts are decimals rounded to each currency's minor unit,
