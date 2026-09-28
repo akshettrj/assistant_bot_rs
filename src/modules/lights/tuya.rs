@@ -487,10 +487,38 @@ impl TuyaLight {
         Ok(self.read().await?.1)
     }
 
+    /// Sends a request, reconnecting first if the light isn't connected.
+    ///
+    /// The library retries a lost connection in the background with a
+    /// backoff that grows to over an hour, and turns every request down while
+    /// it waits; so a bulb switched back on would stay unreachable until the
+    /// next attempt. A command skips that wait and connects now. A connection
+    /// that drops during the request (a bulb switched off and on since the
+    /// last one) is also reconnected, and the request sent once more: they
+    /// set absolute values, so sending one twice is harmless.
+    async fn call<F, R>(&self, request: F) -> LightResult<Option<String>>
+    where
+        F: Fn() -> R,
+        R: Future<Output = rustuya::error::Result<Option<String>>>,
+    {
+        let connected = self.device.is_connected();
+        if !connected {
+            self.device.connect_now().await;
+        }
+        match request().await {
+            Err(error) if connected && !self.device.is_connected() => {
+                tracing::debug!(%error, "the light's connection dropped: reconnecting");
+                self.device.connect_now().await;
+                request().await.map_err(unreachable)
+            }
+            result => result.map_err(unreachable),
+        }
+    }
+
     /// Queries the DPs, refreshing the cache, and returns them with the
     /// schema.
     async fn read(&self) -> LightResult<(Schema, Map<String, Value>)> {
-        let dps = parse_dps(self.device.status().await.map_err(unreachable)?)?;
+        let dps = parse_dps(self.call(|| self.device.status()).await?)?;
         *lock(&self.dps) = dps.clone();
         let schema = schema_for(&self.schema, &dps)?;
         Ok((schema, dps))
@@ -539,10 +567,8 @@ impl LightDriver for TuyaLight {
             let current = decode(&schema, &dps)?;
 
             let update = encode(&schema, &change, &current)?;
-            self.device
-                .set_dps(Value::Object(update.clone()))
-                .await
-                .map_err(unreachable)?;
+            self.call(|| self.device.set_dps(Value::Object(update.clone())))
+                .await?;
 
             // Devices only acknowledge; the new state is the old one with
             // the update applied.
