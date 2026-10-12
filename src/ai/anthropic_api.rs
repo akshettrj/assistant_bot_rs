@@ -148,12 +148,70 @@ fn body(request: &Request, model: &str) -> Value {
         "max_tokens": MAX_TOKENS,
         "system": request.system,
         "messages": [{"role": "user", "content": content}],
-        "output_config": {"format": {"type": "json_schema", "schema": request.schema}},
+        "output_config": {"format": {"type": "json_schema", "schema": nullable_as_any_of(&request.schema)}},
     });
     if FALLBACK_MODELS.contains(&model) {
         body["fallbacks"] = json!("default");
     }
     body
+}
+
+/// `schema` as the API's structured outputs take it: a type that may be null
+/// (`"type": ["string", "null"]`, with `null` among its `enum`) becomes
+/// `anyOf` the type and null, since the API checks an `enum` against a
+/// single type.
+fn nullable_as_any_of(schema: &Value) -> Value {
+    match schema {
+        Value::Array(schemas) => Value::Array(schemas.iter().map(nullable_as_any_of).collect()),
+        Value::Object(fields) => {
+            // Subschemas first, wherever they are.
+            let mut fields: serde_json::Map<String, Value> = fields
+                .iter()
+                .map(|(key, value)| {
+                    let value = match key.as_str() {
+                        "properties" | "$defs" | "definitions" => match value {
+                            Value::Object(named) => Value::Object(
+                                named
+                                    .iter()
+                                    .map(|(name, schema)| {
+                                        (name.clone(), nullable_as_any_of(schema))
+                                    })
+                                    .collect(),
+                            ),
+                            other => other.clone(),
+                        },
+                        "items" | "anyOf" | "allOf" | "oneOf" => nullable_as_any_of(value),
+                        _ => value.clone(),
+                    };
+                    (key.clone(), value)
+                })
+                .collect();
+            let Some(Value::Array(types)) = fields.get("type") else {
+                return Value::Object(fields);
+            };
+            let null = Value::from("null");
+            if !types.contains(&null) {
+                return Value::Object(fields);
+            }
+            let others: Vec<Value> = types
+                .iter()
+                .filter(|kind| **kind != null)
+                .cloned()
+                .collect();
+            fields.insert(
+                "type".into(),
+                match others.as_slice() {
+                    [only] => only.clone(),
+                    _ => Value::Array(others),
+                },
+            );
+            if let Some(Value::Array(values)) = fields.get_mut("enum") {
+                values.retain(|value| !value.is_null());
+            }
+            json!({"anyOf": [Value::Object(fields), {"type": "null"}]})
+        }
+        other => other.clone(),
+    }
 }
 
 /// What the Messages API answers.
@@ -387,6 +445,80 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, AiError::Unavailable(_)), "{error:?}");
+    }
+
+    #[test]
+    fn types_that_may_be_null_become_any_of() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "category": {"type": ["string", "null"], "enum": ["food", "stay", null]},
+                "note": {"type": ["string", "null"]},
+                "kind": {"type": "string", "enum": ["expense", "settlement"]},
+                "amount": {
+                    "type": ["object", "null"],
+                    "properties": {"value": {"type": ["string", "null"]}},
+                    "required": ["value"],
+                    "additionalProperties": false,
+                },
+                "claims": {"type": "array", "items": {"type": ["string", "null"]}},
+            },
+            "required": ["category", "note", "kind", "amount", "claims"],
+            "additionalProperties": false,
+        });
+        let text = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
+        assert_eq!(
+            nullable_as_any_of(&schema),
+            json!({
+                "type": "object",
+                "properties": {
+                    "category": {"anyOf": [
+                        {"type": "string", "enum": ["food", "stay"]},
+                        {"type": "null"},
+                    ]},
+                    "note": text,
+                    "kind": {"type": "string", "enum": ["expense", "settlement"]},
+                    "amount": {"anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"value": text},
+                            "required": ["value"],
+                            "additionalProperties": false,
+                        },
+                        {"type": "null"},
+                    ]},
+                    "claims": {"type": "array", "items": text},
+                },
+                "required": ["category", "note", "kind", "amount", "claims"],
+                "additionalProperties": false,
+            })
+        );
+    }
+
+    /// Whether `schema` still has a type list anywhere.
+    fn has_type_list(schema: &Value) -> bool {
+        match schema {
+            Value::Object(fields) => {
+                fields.get("type").is_some_and(Value::is_array)
+                    || fields.values().any(has_type_list)
+            }
+            Value::Array(values) => values.iter().any(has_type_list),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn the_features_schemas_have_no_type_lists_left() {
+        use crate::modules::trips::{ask, extract, model, settings::TripsSettings, story};
+        let categories = model::categories(&TripsSettings::default());
+        for schema in [
+            extract::schema(&categories),
+            ask::schema(&categories),
+            story::schema(),
+        ] {
+            assert!(has_type_list(&schema) || schema == story::schema());
+            assert!(!has_type_list(&nullable_as_any_of(&schema)), "{schema}");
+        }
     }
 
     #[test]
