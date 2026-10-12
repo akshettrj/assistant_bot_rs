@@ -703,28 +703,30 @@ pub fn photo_instructions(trip: &TripView, sender: &Member, categories: &[Catego
          小計), a tax already included in the prices (\"incl. tax\", \"of which VAT\", 内消費税), \
          lines restating a tax or what it applies to, the cash handed over and the change \
          (\"Cash\", \"Change\", お預り, お釣), card slips and loyalty points are none of them, \
-         and never a payment: someone paid the total. Count each tax once, even when printed \
-         twice. A mark beside a price isn't part of it: \"*100\" or \"100 T\" is \"100\". The \
-         bill's currency sign gives the currency (\"¥\" or \"円\" is JPY), and its printed date \
-         is the entry's (as YYYY-MM-DD) unless the message gives one.\n\nA line that takes money \
-         off (\"-¥30\", \"▲30\", \"Discount 50\", 値引, a coupon) has a negative amount: write \
-         the number with a minus in front, \"-30\", \"-50\". Lines printed under an item that \
-         change it (a size, a spice level, a topping, an option, a discount on it; usually \
-         indented, without a quantity of their own: \"250g -¥30\", \"3辛 ¥75\") are items of \
-         their own, for whoever had the item above them. A discount on the whole bill is an \
-         extra, proportional.\n\nWho had what goes by the bill's own lines. Give one item claim \
-         per line, in the order printed, with the line's amount (what the line comes to, not a \
-         unit price). When the message hands out lines by position (\"the first two items were \
-         Carol's, the next four Dave's, the rest Erin's\"), count only the things bought, in the \
-         order printed: not the lines changing the item above them, nor tax, service, discount or \
-         total lines. Give each item \"only\" [whoever had it]; a line two people shared is \
-         \"only\" [both]. For \"the rest\" or \"everything else\", also add a remainder claim \
-         \"only\" [that person], so that anything left over is theirs too. Lines the message \
-         doesn't give anyone are for everyone.\n\nExample: a bill of six items, a service charge \
-         and a total, with \"first two mine, next three Carol's, the rest Erin's; Dave paid for \
-         all\": items one and two \"only\" [me]; items three to five \"only\" [Carol]; item six \
-         \"only\" [Erin]; remainder \"only\" [Erin]; extra \"service\" as printed, proportional; \
-         total as printed; paid Dave rest.",
+         and never a payment: someone paid the total. Count each tax and each discount once, even \
+         when printed twice: a discount under its item counts, not the lines summing the \
+         discounts up afterwards (\"Total discount\", 値引合計, a discount per tax rate), nor the \
+         items' total (商品代金). A mark beside a price isn't part of it: \"*100\", \"100 T\", \
+         \"322■\" or \"600込\" is the number alone. The bill's currency sign gives the currency \
+         (\"¥\" or \"円\" is JPY), and its printed date is the entry's (as YYYY-MM-DD) unless the \
+         message gives one.\n\nA line that takes money off (\"-¥30\", \"▲30\", \"Discount 50\", \
+         値引, a coupon) has a negative amount: write the number with a minus in front, \"-30\", \
+         \"-50\". Lines printed under an item that change it (a size, a spice level, a topping, \
+         an option, a discount on it; usually indented, without a quantity of their own: \"250g \
+         -¥30\", \"3辛 ¥75\") are items of their own, for whoever had the item above them. A \
+         discount on the whole bill is an extra, proportional.\n\nWho had what goes by the bill's \
+         own lines. Give one item claim per line, in the order printed, with the line's amount \
+         (what the line comes to, not a unit price). When the message hands out lines by position \
+         (\"the first two items were Carol's, the next four Dave's, the rest Erin's\"), count \
+         only the things bought, in the order printed: not the lines changing the item above \
+         them, nor tax, service, discount or total lines. Give each item \"only\" [whoever had \
+         it]; a line two people shared is \"only\" [both]. For \"the rest\" or \"everything \
+         else\", also add a remainder claim \"only\" [that person], so that anything left over is \
+         theirs too. Lines the message doesn't give anyone are for everyone.\n\nExample: a bill \
+         of six items, a service charge and a total, with \"first two mine, next three Carol's, \
+         the rest Erin's; Dave paid for all\": items one and two \"only\" [me]; items three to \
+         five \"only\" [Carol]; item six \"only\" [Erin]; remainder \"only\" [Erin]; extra \
+         \"service\" as printed, proportional; total as printed; paid Dave rest.",
         instructions(trip, sender, categories)
     )
 }
