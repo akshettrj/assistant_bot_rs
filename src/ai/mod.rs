@@ -112,6 +112,8 @@ pub trait Llm: Send + Sync + std::fmt::Debug {
 /// The model's answer to `request`, as `T` (which should match the schema).
 pub async fn extract<T: DeserializeOwned>(llm: &dyn Llm, request: &Request) -> Result<T, AiError> {
     let value = llm.complete(request).await?;
+    // What it made of the message, to see why a reading went wrong.
+    tracing::debug!(answer = %value, "the AI's answer");
     serde_json::from_value(value).map_err(|error| AiError::Invalid(error.to_string()))
 }
 

@@ -181,13 +181,15 @@ pub fn schema(categories: &[Category]) -> Value {
         "required": ["kind", "description", "category", "currency", "rate", "date", "claims", "unclear"],
         "additionalProperties": false,
     });
+    // In the order the model writes them: what's printed on a photo, then the
+    // entries read from it.
     json!({
         "type": "object",
         "properties": {
-            "entries": {"type": "array", "items": entry},
             "transcript": text,
+            "entries": {"type": "array", "items": entry},
         },
-        "required": ["entries", "transcript"],
+        "required": ["transcript", "entries"],
         "additionalProperties": false,
     })
 }
@@ -1441,6 +1443,29 @@ mod tests {
                 .unwrap()
                 .contains(&json!("food"))
         );
+        // The model writes the fields in this order: what's printed on a photo
+        // before the entries read from it, and what a claim is before its
+        // details.
+        let keys = |object: &Value| -> Vec<String> {
+            object["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(keys(&schema), ["transcript", "entries"]);
+        assert_eq!(
+            keys(entry)[..3],
+            ["kind".to_string(), "description".into(), "category".into()]
+        );
+        let claim = &entry["properties"]["claims"]["items"];
+        assert_eq!(
+            keys(claim)[..3],
+            ["type".to_string(), "person".into(), "label".into()]
+        );
+        let sent = schema.to_string();
+        assert!(sent.find("\"transcript\"") < sent.find("\"entries\""));
         let mut trip = goa();
         trip.members[3].nicknames = vec!["Rinny".into()];
         let text = instructions(&trip, &trip.members[0], &categories);
