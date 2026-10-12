@@ -138,16 +138,22 @@ auto_rates = true
 # visa = "🛂 Visa"
 
 # The AI that reads messages (e.g. "dinner 2400, Ann and I split it" becomes a
-# draft expense to check). It runs the Claude Code CLI (`claude`, which must be
-# installed) with your Claude subscription, without tools, in an empty
-# directory. Without a token, AI features are off.
+# draft expense to check), without tools. With an API key it calls the Claude
+# API; else, with a token, it runs the Claude Code CLI (`claude`, which must be
+# installed) with your Claude subscription, in an empty directory. Without
+# either, AI features are off.
 [ai]
-# A token from `claude setup-token`, valid a year. Prefer the environment:
-# ASSISTANT_AI__OAUTH_TOKEN=sk-ant-oat01-...
+# A Claude API key, from the Claude Console. It wins over `oauth_token`.
+# Prefer the environment: ASSISTANT_AI__API_KEY=sk-ant-api03-...
+# api_key = ""
+# A token from `claude setup-token`, valid a year, for the CLI. Prefer the
+# environment: ASSISTANT_AI__OAUTH_TOKEN=sk-ant-oat01-...
 # oauth_token = ""
 # The `claude` program, if it isn't on the PATH.
 # claude_path = "/home/you/.local/bin/claude"
-# Runtime. sonnet, haiku (cheaper), opus, or a full model name.
+# Runtime. sonnet, haiku (cheaper), opus, or a full model name
+# (claude-opus-5); with the API, the names stand for claude-sonnet-5,
+# claude-haiku-4-5 and claude-opus-5.
 model = "sonnet"
 # Runtime. Who may use it besides the owner and the sudo users: it uses your
 # subscription, which Anthropic's terms intend for your own use.

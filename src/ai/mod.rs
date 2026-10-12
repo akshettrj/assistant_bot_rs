@@ -5,22 +5,25 @@
 //! features must check what comes back against the text, and do any maths
 //! themselves.
 //!
-//! The backend is [`ClaudeCli`], the Claude Code CLI with the owner's
-//! subscription (`[ai]` in the config). It is built at startup when a token
-//! is configured, and shared through
+//! The backend (`[ai]` in the config) is [`AnthropicApi`], the Claude API
+//! with an API key, or else [`ClaudeCli`], the Claude Code CLI with the
+//! owner's subscription. It is built at startup when a key or a token is
+//! configured, and shared through
 //! [`AppContext::ai`](crate::context::AppContext::ai).
 
+mod anthropic_api;
 mod claude_cli;
 #[cfg(test)]
 pub mod fake;
 
 use std::sync::Arc;
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use teloxide::types::UserId;
 
-pub use self::claude_cli::ClaudeCli;
+pub use self::{anthropic_api::AnthropicApi, claude_cli::ClaudeCli};
 use crate::{
     config::AiConfig,
     settings::{Snapshot, SnapshotExt},
@@ -47,6 +50,33 @@ pub struct Image {
     /// E.g. `image/jpeg`.
     pub media_type: String,
     pub data: Vec<u8>,
+}
+
+impl Image {
+    /// The image as a message's content block, as Claude takes it.
+    fn block(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": self.media_type,
+                "data": BASE64.encode(&self.data),
+            },
+        })
+    }
+}
+
+/// The longest error text kept from a backend.
+const MAX_ERROR: usize = 300;
+
+/// `text`, cut to a length fit for an error message.
+fn shorten(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= MAX_ERROR {
+        text.to_string()
+    } else {
+        text.chars().take(MAX_ERROR).chain(['…']).collect()
+    }
 }
 
 impl std::fmt::Debug for Image {
@@ -85,8 +115,12 @@ pub async fn extract<T: DeserializeOwned>(llm: &dyn Llm, request: &Request) -> R
     serde_json::from_value(value).map_err(|error| AiError::Invalid(error.to_string()))
 }
 
-/// The configured model, if there is one.
+/// The configured model, if there is one: the API with a key, else the CLI
+/// with a token.
 pub fn from_config(config: &AiConfig) -> Option<Arc<dyn Llm>> {
+    if let Some(api) = AnthropicApi::from_config(config) {
+        return Some(Arc::new(api));
+    }
     ClaudeCli::from_config(config).map(|cli| Arc::new(cli) as Arc<dyn Llm>)
 }
 
@@ -123,6 +157,9 @@ mod tests {
         config.oauth_token = Some(Secret::new("  ".into()));
         assert!(from_config(&config).is_none());
         config.oauth_token = Some(Secret::new("sk-ant-oat01-x".into()));
-        assert!(from_config(&config).is_some());
+        assert!(format!("{:?}", from_config(&config).unwrap()).starts_with("ClaudeCli"));
+        // An API key wins.
+        config.api_key = Some(Secret::new("sk-ant-api03-x".into()));
+        assert!(format!("{:?}", from_config(&config).unwrap()).starts_with("AnthropicApi"));
     }
 }

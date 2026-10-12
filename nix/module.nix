@@ -74,8 +74,8 @@ in
       description = ''
         A file of `ASSISTANT_<KEY__PATH>=value` lines, read by the service and
         by the `assistant-bot` command, for the settings that must stay out of
-        the Nix store: `ASSISTANT_TELEGRAM__BOT_TOKEN`,
-        `ASSISTANT_AI__OAUTH_TOKEN`, and
+        the Nix store: `ASSISTANT_TELEGRAM__BOT_TOKEN`, `ASSISTANT_AI__API_KEY`
+        (or `ASSISTANT_AI__OAUTH_TOKEN` for the CLI), and
         `ASSISTANT_MODULES__LIGHTS__DEVICES__<LIGHT>__LOCAL_KEY`.
       '';
     };
@@ -85,8 +85,9 @@ in
       default = null;
       example = lib.literalExpression "pkgs.claude-code";
       description = ''
-        The Claude Code CLI that the AI features run (it is unfree). Sets
-        `ai.claude_path`; the AI also needs `ASSISTANT_AI__OAUTH_TOKEN`.
+        The Claude Code CLI (unfree), for AI features run with a Claude
+        subscription's `ASSISTANT_AI__OAUTH_TOKEN`; sets `ai.claude_path`. Not
+        needed with an `ASSISTANT_AI__API_KEY`, which calls the Claude API.
       '';
     };
 

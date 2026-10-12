@@ -4,13 +4,19 @@ use teloxide::types::UserId;
 use crate::config::Secret;
 
 /// `[ai]`: the language model that features use to read what people write
-/// (e.g. expenses in plain words). It runs through the Claude Code CLI with a
-/// Claude subscription; without a token, those features are off.
+/// (e.g. expenses in plain words): the Claude API with an API key, else the
+/// Claude Code CLI with a Claude subscription's token. Without either, those
+/// features are off.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
-    /// A token from `claude setup-token` (valid a year). Best passed as
-    /// `ASSISTANT_AI__OAUTH_TOKEN`.
+    /// A Claude API key, from the Claude Console. Best passed as
+    /// `ASSISTANT_AI__API_KEY`. It wins over `oauth_token`.
+    pub api_key: Option<Secret<String>>,
+    /// The API's address, for a proxy; defaults to Anthropic's.
+    pub api_url: Option<String>,
+    /// A token from `claude setup-token` (valid a year), for the CLI. Best
+    /// passed as `ASSISTANT_AI__OAUTH_TOKEN`.
     pub oauth_token: Option<Secret<String>>,
     /// The `claude` program, if it isn't on the `PATH`.
     pub claude_path: Option<String>,
@@ -28,6 +34,8 @@ pub struct AiConfig {
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
+            api_key: None,
+            api_url: None,
             oauth_token: None,
             claude_path: None,
             model: "sonnet".to_string(),
@@ -39,11 +47,23 @@ impl Default for AiConfig {
 }
 
 impl AiConfig {
-    /// Whether the AI can be used at all.
-    pub fn is_configured(&self) -> bool {
+    /// The API key, if one is set.
+    pub fn api_key(&self) -> Option<&Secret<String>> {
+        self.api_key
+            .as_ref()
+            .filter(|key| !key.expose().trim().is_empty())
+    }
+
+    /// The CLI's token, if one is set.
+    pub fn oauth_token(&self) -> Option<&Secret<String>> {
         self.oauth_token
             .as_ref()
-            .is_some_and(|token| !token.expose().trim().is_empty())
+            .filter(|token| !token.expose().trim().is_empty())
+    }
+
+    /// Whether the AI can be used at all.
+    pub fn is_configured(&self) -> bool {
+        self.api_key().is_some() || self.oauth_token().is_some()
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {

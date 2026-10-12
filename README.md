@@ -32,10 +32,12 @@ services.assistant-bot = {
     telegram.owner_id = 123456789;
     telegram.error_logs_chat_id = -1001234567890;
   };
-  # ASSISTANT_TELEGRAM__BOT_TOKEN=..., ASSISTANT_AI__OAUTH_TOKEN=...: kept
-  # out of the Nix store, which anyone on the machine can read.
+  # ASSISTANT_TELEGRAM__BOT_TOKEN=..., ASSISTANT_AI__API_KEY=...: kept out of
+  # the Nix store, which anyone on the machine can read.
   environmentFile = "/etc/secrets/assistant-bot.env";
-  claudePackage = pkgs.claude-code; # for the AI (unfree)
+  # Only for the AI through the Claude Code CLI (unfree), with a
+  # subscription's ASSISTANT_AI__OAUTH_TOKEN instead of an API key.
+  # claudePackage = pkgs.claude-code;
   openLightsFirewall = true; # UDP 6666, 6667, 7000 for finding bulbs
 };
 ```
@@ -419,16 +421,32 @@ summary's.
 
 ## AI
 
-Modules can read what people write with a language model: the Claude Code
-CLI, with your Claude subscription (no API key). Install Claude Code, run
-`claude setup-token`, and pass the token as `ASSISTANT_AI__OAUTH_TOKEN` (or
-`ai.oauth_token`). Each request runs `claude -p` without tools (so a message
-can't make it read files or run commands), in an empty temporary directory,
-with only the token and `PATH` in its environment.
+Modules can read what people write with a language model, Claude, in one of
+two ways:
 
-Only the owner and the sudo users may use it, plus the users in `ai.users`:
-it uses your subscription, which Anthropic's terms intend for your own use.
-`ai.model` picks the model (`sonnet`, or `haiku` to save usage). Try it with
+- **The Claude API**, with an API key from the Claude Console (e.g. the
+  monthly API credit that comes with a Max plan): pass it as
+  `ASSISTANT_AI__API_KEY` (or `ai.api_key`). Each request is one call to the
+  Messages API with the answer's JSON schema as a structured output, and no
+  tools. Its token usage is logged at the debug level. This is the lighter
+  way: nothing to install, nor a program started per request.
+- **The Claude Code CLI**, with your Claude subscription: install Claude
+  Code, run `claude setup-token`, and pass the token as
+  `ASSISTANT_AI__OAUTH_TOKEN` (or `ai.oauth_token`). Each request runs
+  `claude -p` without tools, in an empty temporary directory, with only the
+  token and `PATH` in its environment. Its usage counts against your
+  subscription's limits.
+
+An API key wins when both are set. Without tools, a message can't make the
+model read files or run commands: the worst it can do is fill the schema
+wrongly, which the features check.
+
+Only the owner and the sudo users may use it, plus the users in `ai.users`.
+`ai.model` picks the model: `opus`, `sonnet` or `haiku` (the API takes them
+as `claude-opus-5`, `claude-sonnet-5` and `claude-haiku-4-5`), or a full
+model name. With `claude-opus-5`, the API answers a request the model
+declines with a fallback model. Try a backend with
+`ASSISTANT_AI__API_KEY=... cargo test -- --ignored real_api` or
 `ASSISTANT_AI__OAUTH_TOKEN=... cargo test -- --ignored real_claude`.
 
 ## Architecture

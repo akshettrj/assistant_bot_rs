@@ -7,16 +7,12 @@
 
 use std::{io::ErrorKind, path::Path, process::Stdio, time::Duration};
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore};
 
-use super::{AiError, Llm, Request};
+use super::{AiError, Image, Llm, Request, shorten};
 use crate::config::{AiConfig, Secret};
-
-/// The longest error text kept from the CLI.
-const MAX_ERROR: usize = 300;
 
 pub struct ClaudeCli {
     program: String,
@@ -37,12 +33,9 @@ impl std::fmt::Debug for ClaudeCli {
 impl ClaudeCli {
     /// The CLI configured by `[ai]`, if a token is.
     pub fn from_config(config: &AiConfig) -> Option<Self> {
-        if !config.is_configured() {
-            return None;
-        }
         Some(Self::new(
             config.claude_path.as_deref().unwrap_or("claude"),
-            config.oauth_token.clone()?,
+            config.oauth_token()?.clone(),
             Duration::from_secs(config.timeout_secs),
             config.max_concurrent,
         ))
@@ -158,20 +151,7 @@ fn input(request: &Request) -> Vec<u8> {
     if !streams(request) {
         return request.text.clone().into_bytes();
     }
-    let mut content: Vec<serde_json::Value> = request
-        .images
-        .iter()
-        .map(|image| {
-            serde_json::json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": image.media_type,
-                    "data": BASE64.encode(&image.data),
-                },
-            })
-        })
-        .collect();
+    let mut content: Vec<serde_json::Value> = request.images.iter().map(Image::block).collect();
     content.push(serde_json::json!({"type": "text", "text": request.text}));
     let message = serde_json::json!({
         "type": "user",
@@ -230,15 +210,6 @@ impl Output {
             .trim_end_matches("```");
         serde_json::from_str(json.trim())
             .map_err(|_| AiError::Invalid(format!("no structured answer in {}", shorten(&text))))
-    }
-}
-
-fn shorten(text: &str) -> String {
-    let text = text.trim();
-    if text.chars().count() <= MAX_ERROR {
-        text.to_string()
-    } else {
-        text.chars().take(MAX_ERROR).chain(['…']).collect()
     }
 }
 
