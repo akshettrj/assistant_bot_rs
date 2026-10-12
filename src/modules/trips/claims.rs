@@ -466,7 +466,9 @@ impl<'a> Solver<'a> {
     }
 
     /// The value of `amount`; `count` is the size of the group "each" is
-    /// for, and `of_items` whether it may be a percentage of the items.
+    /// for, and `of_items` whether it may be a percentage of the items. A
+    /// bill's lines (items and extras) may take money off: a discount, a
+    /// smaller portion.
     fn value(
         &mut self,
         amount: &Amount,
@@ -474,10 +476,15 @@ impl<'a> Solver<'a> {
         count: Option<usize>,
         of_items: bool,
     ) -> Option<Value> {
+        let signed = matches!(subject, Subject::Item(_) | Subject::Extra(_));
         match *amount {
+            Amount::Literal { value } if signed => Money::new(value, self.currency)
+                .map_err(|error| self.problems.push(error.into()))
+                .ok()
+                .map(Value::Known),
             Amount::Literal { value } => self.money(value, subject).map(Value::Known),
             Amount::Percent { value, of } => {
-                if value <= Decimal::ZERO {
+                if value <= Decimal::ZERO && !signed {
                     self.problems.push(Problem::NotPositive(subject));
                     return None;
                 }
@@ -851,6 +858,15 @@ impl<'a> Solver<'a> {
             });
         }
 
+        // Lines that take money off may leave someone owing less than nothing.
+        let below_zero: Vec<Problem> = owed
+            .iter()
+            .filter(|(_, amount)| amount.amount() < Decimal::ZERO)
+            .map(|(member, _)| Problem::NotPositive(Subject::Share(*member)))
+            .collect();
+        if !below_zero.is_empty() {
+            return Err(below_zero);
+        }
         let owed: Vec<(MemberId, Money)> = self
             .members
             .iter()
@@ -1127,6 +1143,66 @@ mod tests {
             amount: literal(value),
             group,
         }
+    }
+
+    #[test]
+    fn bill_lines_may_take_money_off() {
+        // A curry with a smaller portion (-30) and a spicier sauce (+75), and
+        // a coupon off the whole bill, spread over what each had.
+        let paid = Claim::Paid {
+            who: DAVE,
+            amount: Amount::Rest,
+        };
+        let solution = solved(&[
+            item("curry", dec!(1199), Group::Only(vec![ME])),
+            item("250g", dec!(-30), Group::Only(vec![ME])),
+            item("3 spicy", dec!(75), Group::Only(vec![ME])),
+            item("naan", dec!(421), Group::Only(vec![CAROL])),
+            Claim::Extra {
+                label: "coupon".into(),
+                amount: literal(dec!(-100)),
+                spread: Spread::Proportional,
+            },
+            Claim::Total {
+                amount: literal(dec!(1565)),
+            },
+            paid.clone(),
+        ]);
+        // 1,244 and 421 of 1,665; the coupon's 100 in proportion.
+        assert_eq!(
+            owed(&solution),
+            [(ME, dec!(1169.29)), (CAROL, dec!(395.71))]
+        );
+        assert_eq!(solution.paid[0].amount.amount(), dec!(1565));
+
+        // A discount bigger than what someone had leaves them below nothing.
+        let problems = solve(
+            &[
+                item("water", dec!(100), Group::Only(vec![CAROL])),
+                item("discount", dec!(-150), Group::Only(vec![CAROL])),
+                item("naan", dec!(421), Group::Only(vec![ME])),
+                paid.clone(),
+            ],
+            MEMBERS,
+            inr(),
+        )
+        .unwrap_err();
+        assert!(problems.contains(&Problem::NotPositive(Subject::Share(CAROL))));
+
+        // Payments and totals still can't be negative.
+        let problems = solve(
+            &[
+                item("naan", dec!(421), Group::Only(vec![ME])),
+                Claim::Paid {
+                    who: DAVE,
+                    amount: literal(dec!(-421)),
+                },
+            ],
+            MEMBERS,
+            inr(),
+        )
+        .unwrap_err();
+        assert!(problems.contains(&Problem::NotPositive(Subject::Payment(DAVE))));
     }
 
     #[test]

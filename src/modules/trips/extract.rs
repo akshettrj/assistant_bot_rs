@@ -298,7 +298,10 @@ pub struct Sources<'a> {
 }
 
 impl Sources<'_> {
+    /// Whether `written` is in one of the sources. A sign taking money off
+    /// needn't be: it isn't always printed next to the number (`-¥30`).
     fn has(&self, written: &str) -> bool {
+        let written = sign(written).1;
         appears(written, self.message)
             || self.card.is_some_and(|card| appears(written, card))
             || self.photo.is_some_and(|photo| appears(written, photo))
@@ -507,10 +510,11 @@ impl Reader<'_> {
             },
             AmountKind::Percent => {
                 let written = value()?;
-                let percent = command::parse_amount(written.trim().trim_end_matches('%'))
+                let (negative, unsigned) = sign(written);
+                let percent = command::parse_amount(unsigned.trim_end_matches('%'))
                     .map_err(|_| unreadable(written))?;
                 Amount::Percent {
-                    value: percent,
+                    value: if negative { -percent } else { percent },
                     of: amount.of.unwrap_or(Base::Items),
                 }
             }
@@ -630,13 +634,26 @@ fn word_weight(word: &str) -> Option<Decimal> {
 
 /// An amount the model copied: `2,400`, `30.50`, `2.4k`, or with a currency
 /// attached (`$30`).
-fn read_amount(text: &str) -> Result<(Decimal, Option<Currency>), Rejection> {
-    let text = text.trim();
-    if let Some(thousands) = text.strip_suffix(['k', 'K']) {
-        let value = command::parse_amount(thousands).map_err(|_| unreadable(text))?;
-        return Ok((value * Decimal::ONE_THOUSAND, None));
+fn read_amount(written: &str) -> Result<(Decimal, Option<Currency>), Rejection> {
+    let (negative, text) = sign(written);
+    let (value, currency) = match text.strip_suffix(['k', 'K']) {
+        Some(thousands) => {
+            let value = command::parse_amount(thousands).map_err(|_| unreadable(written))?;
+            (value * Decimal::ONE_THOUSAND, None)
+        }
+        None => command::parse_money(text).map_err(|_| unreadable(written))?,
+    };
+    Ok((if negative { -value } else { value }, currency))
+}
+
+/// Whether `written` takes money off (`-30`, `−30`, or `▲30` as Japanese
+/// receipts mark discounts), and the number without that sign.
+fn sign(written: &str) -> (bool, &str) {
+    let written = written.trim();
+    match written.strip_prefix(['-', '−', '▲']) {
+        Some(unsigned) => (true, unsigned.trim_start()),
+        None => (false, written),
     }
-    command::parse_money(text).map_err(|_| unreadable(text))
 }
 
 /// Whether `amount` is written in `message` as a number of its own: `400` is
@@ -689,12 +706,18 @@ pub fn photo_instructions(trip: &TripView, sender: &Member, categories: &[Catego
          and never a payment: someone paid the total. Count each tax once, even when printed \
          twice. A mark beside a price isn't part of it: \"*100\" or \"100 T\" is \"100\". The \
          bill's currency sign gives the currency (\"¥\" or \"円\" is JPY), and its printed date \
-         is the entry's (as YYYY-MM-DD) unless the message gives one.\n\nWho had what goes by the \
-         bill's own lines. Give one item claim per line, in the order printed, with the line's \
-         amount (what the line comes to, not a unit price). When the message hands out lines by \
-         position (\"the first two items were Carol's, the next four Dave's, the rest Erin's\"), \
-         count only the item lines, in the order printed (not tax, service, discount or total \
-         lines), and give each item \"only\" [whoever had it]; a line two people shared is \
+         is the entry's (as YYYY-MM-DD) unless the message gives one.\n\nA line that takes money \
+         off (\"-¥30\", \"▲30\", \"Discount 50\", 値引, a coupon) has a negative amount: write \
+         the number with a minus in front, \"-30\", \"-50\". Lines printed under an item that \
+         change it (a size, a spice level, a topping, an option, a discount on it; usually \
+         indented, without a quantity of their own: \"250g -¥30\", \"3辛 ¥75\") are items of \
+         their own, for whoever had the item above them. A discount on the whole bill is an \
+         extra, proportional.\n\nWho had what goes by the bill's own lines. Give one item claim \
+         per line, in the order printed, with the line's amount (what the line comes to, not a \
+         unit price). When the message hands out lines by position (\"the first two items were \
+         Carol's, the next four Dave's, the rest Erin's\"), count only the things bought, in the \
+         order printed: not the lines changing the item above them, nor tax, service, discount or \
+         total lines. Give each item \"only\" [whoever had it]; a line two people shared is \
          \"only\" [both]. For \"the rest\" or \"everything else\", also add a remainder claim \
          \"only\" [that person], so that anything left over is theirs too. Lines the message \
          doesn't give anyone are for everyone.\n\nExample: a bill of six items, a service charge \
@@ -1319,6 +1342,90 @@ mod tests {
         assert_eq!(owed, [(2, dec!(281)), (3, dec!(455)), (4, dec!(391))]);
         assert_eq!(solution.paid[0].member, 1);
         assert_eq!(solution.paid[0].amount.amount(), dec!(1127));
+    }
+
+    #[test]
+    fn lines_changing_an_item_go_with_it_and_may_take_money_off() {
+        // A curry shop's receipt, prices including tax: a curry with a smaller
+        // portion (-¥30) and a spice level (¥75) printed under it. "First two
+        // mine, the rest Erin's, Dave paid".
+        let trip = goa();
+        let categories = model::categories(&TripsSettings::default());
+        let only = |name: &str| json!({"who": "only", "names": [name]});
+        let item = |label: &str, amount: &str, name: &str| {
+            with(
+                claim("item"),
+                json!({"label": label, "amount": number(amount), "group": only(name)}),
+            )
+        };
+        let transcript = "CoCo壱番屋\nご利用日:2026年10月04日\nオーダー 単価 数量 \
+                          金額\nチーズナン ¥421 1 ¥421内\nバターチキンカレー ¥1,199 1 \
+                          ¥1,199内\n250g -¥30内\n3辛 ¥75内\nコカ・コーラ ¥220 1 \
+                          ¥220内\nフィッシュフライ(2本)カレー ¥932 1 ¥932内\n1辛 \
+                          ¥25内\nポークカレーパン ¥320 1 ¥320内\nオレンジドリンク ¥220 1 \
+                          ¥220内\nラッシー(プレーン) ¥220 1 ¥220内\nラッシー(プレーン) ¥220 1 \
+                          ¥220内\n小計 ¥3,822\n(税合計 ¥347)\n合計 ¥3,822\n(10%課税対象 \
+                          ¥3,822)\n(税額10% ¥347)\nクレジット ¥3,822\nおつり ¥0";
+        let mut entry = entry(vec![
+            item("チーズナン (cheese naan)", "421", "me"),
+            item("バターチキンカレー (butter chicken curry)", "1,199", "me"),
+            item("250g (smaller rice)", "-30", "me"),
+            item("3辛 (spice level 3)", "75", "me"),
+            item("コカ・コーラ (Coca-Cola)", "220", "Erin"),
+            item(
+                "フィッシュフライ(2本)カレー (fish fry curry)",
+                "932",
+                "Erin",
+            ),
+            item("1辛 (spice level 1)", "25", "Erin"),
+            item("ポークカレーパン (pork curry bread)", "320", "Erin"),
+            item("オレンジドリンク (orange drink)", "220", "Erin"),
+            item("ラッシー(プレーン) (plain lassi)", "220", "Erin"),
+            item("ラッシー(プレーン) (plain lassi)", "220", "Erin"),
+            with(claim("remainder"), json!({"group": only("Erin")})),
+            with(claim("total"), json!({"amount": number("3,822")})),
+            with(
+                claim("paid"),
+                json!({"person": "Dave", "amount": {"kind": "rest", "value": null, "of": null}}),
+            ),
+        ]);
+        entry["currency"] = json!("JPY");
+        let reading: Reading =
+            serde_json::from_value(json!({"transcript": transcript, "entries": [entry]})).unwrap();
+        let sources = Sources {
+            message: "first two mine, the rest Erin's, Dave paid",
+            card: None,
+            photo: reading.transcript.as_deref(),
+        };
+        let draft = to_drafts(
+            &reading,
+            sources,
+            &trip,
+            &trip.members[0],
+            &categories,
+            today(),
+        )
+        .unwrap()
+        .remove(0)
+        .unwrap();
+        let solution =
+            super::super::claims::solve(&draft.claims, &[1, 2, 3, 4], draft.currency).unwrap();
+        let owed: Vec<(MemberId, Decimal)> = solution
+            .owed
+            .iter()
+            .map(|(member, amount)| (*member, amount.amount()))
+            .collect();
+        // 421 + 1,199 - 30 + 75, and the rest of the 3,822.
+        assert_eq!(owed, [(1, dec!(1665)), (4, dec!(2157))]);
+        assert_eq!(solution.paid[0].member, 3);
+
+        // The signs that take money off.
+        assert_eq!(read_amount("-30"), Ok((dec!(-30), None)));
+        assert_eq!(read_amount("▲ 30"), Ok((dec!(-30), None)));
+        assert_eq!(
+            read_amount("-¥30"),
+            Ok((dec!(-30), Some(Currency::from_code("JPY").unwrap())))
+        );
     }
 
     #[test]
