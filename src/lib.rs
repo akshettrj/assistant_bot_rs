@@ -22,6 +22,7 @@ pub mod modules;
 pub mod prompts;
 pub mod scheduling;
 pub mod settings;
+pub mod splitwise;
 pub mod telemetry;
 
 #[cfg(test)]

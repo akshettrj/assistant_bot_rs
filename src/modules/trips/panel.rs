@@ -17,6 +17,7 @@ use super::{
     money::{Currency, Money, Rate},
     service::TripView,
     settings::TripsSettings,
+    splitwise::panel::{SwAction, SwPage},
     text,
 };
 use crate::db::{
@@ -44,6 +45,7 @@ pub enum Page {
     Summary,
     /// Asks whether to end the trip.
     ConfirmEnd,
+    Splitwise(SwPage),
 }
 
 /// A value typed in answer to the panel's question.
@@ -54,6 +56,8 @@ pub enum Field {
     User,
     Rate,
     Nickname,
+    /// A member's email, to invite them to the Splitwise group.
+    Email(MemberId),
 }
 
 impl Field {
@@ -67,6 +71,9 @@ impl Field {
                 format!("Send a currency and how much {base} one unit costs, e.g. USD 83.25")
             }
             Self::Nickname => "Who, and what else do they go by? e.g. Erin Rinny".to_string(),
+            Self::Email(_) => {
+                "What's their email? Splitwise adds them to the group and invites them.".to_string()
+            }
         }
     }
 
@@ -76,6 +83,7 @@ impl Field {
             Self::User => "@bob",
             Self::Rate => "USD 83.25",
             Self::Nickname => "Erin Rinny",
+            Self::Email(_) => "erin@example.com",
         }
     }
 }
@@ -104,6 +112,7 @@ pub enum Action {
     Reopen,
     /// Sends the entries as a CSV file.
     Export,
+    Splitwise(SwAction),
 }
 
 impl Action {
@@ -132,10 +141,19 @@ impl Action {
             Self::End => "end".to_string(),
             Self::Reopen => "reopen".to_string(),
             Self::Export => "csv".to_string(),
+            Self::Show(Page::Splitwise(page)) => format!("sw:{}", page.encode()),
+            Self::Splitwise(action) => format!("swa:{}", action.encode()),
+            Self::Ask(Field::Email(member)) => format!("a:email:{member}"),
         }
     }
 
     fn decode(text: &str) -> Option<Self> {
+        if let Some(page) = text.strip_prefix("sw:") {
+            return SwPage::decode(page).map(|page| Self::Show(Page::Splitwise(page)));
+        }
+        if let Some(action) = text.strip_prefix("swa:") {
+            return SwAction::decode(action).map(Self::Splitwise);
+        }
         let mut parts = text.split(':');
         let verb = parts.next()?;
         let mut next = || parts.next();
@@ -168,6 +186,7 @@ impl Action {
                 "user" => Self::Ask(Field::User),
                 "rate" => Self::Ask(Field::Rate),
                 "nick" => Self::Ask(Field::Nickname),
+                "email" => Self::Ask(Field::Email(next()?.parse().ok()?)),
                 _ => return None,
             },
             _ => return None,
@@ -186,12 +205,16 @@ pub fn parse(data: &str) -> Option<(i32, Action)> {
     Some((trip.parse().ok()?, Action::decode(action)?))
 }
 
-fn button(trip: i32, label: impl Into<String>, action: &Action) -> Option<InlineKeyboardButton> {
+pub(super) fn button(
+    trip: i32,
+    label: impl Into<String>,
+    action: &Action,
+) -> Option<InlineKeyboardButton> {
     let data = data(trip, action);
     (data.len() <= MAX_CALLBACK_DATA).then(|| InlineKeyboardButton::callback(label, data))
 }
 
-fn rows(
+pub(super) fn rows(
     buttons: Vec<Option<InlineKeyboardButton>>,
     per_row: usize,
 ) -> Vec<Vec<InlineKeyboardButton>> {
@@ -204,7 +227,7 @@ fn rows(
         .collect()
 }
 
-fn back(trip: i32, to: Page) -> Vec<InlineKeyboardButton> {
+pub(super) fn back(trip: i32, to: Page) -> Vec<InlineKeyboardButton> {
     button(trip, "⬅️ Back", &Action::Show(to))
         .into_iter()
         .collect()
@@ -216,7 +239,7 @@ pub struct Rendered {
     pub keyboard: InlineKeyboardMarkup,
 }
 
-fn title(trip: &Trip, page: &str) -> String {
+pub(super) fn title(trip: &Trip, page: &str) -> String {
     format!("{} · {}", bold(page), escape(&trip.name))
 }
 
@@ -265,6 +288,11 @@ pub fn home(trip: &TripView, entries: &[EntryRecord]) -> Rendered {
             button(id, "🔀 Switch trip", &Action::Show(Page::Switch)),
             button(id, "📊 Summary", &Action::Show(Page::Summary)),
             button(id, "📤 Export", &Action::Export),
+            button(
+                id,
+                "🟩 Splitwise",
+                &Action::Show(Page::Splitwise(SwPage::Home)),
+            ),
             if trip.trip.is_ended() {
                 button(id, "↩️ Reopen", &Action::Reopen)
             } else {

@@ -32,8 +32,9 @@ services.assistant-bot = {
     telegram.owner_id = 123456789;
     telegram.error_logs_chat_id = -1001234567890;
   };
-  # ASSISTANT_TELEGRAM__BOT_TOKEN=..., ASSISTANT_AI__API_KEY=...: kept out of
-  # the Nix store, which anyone on the machine can read.
+  # ASSISTANT_TELEGRAM__BOT_TOKEN=..., ASSISTANT_AI__API_KEY=...,
+  # ASSISTANT_SPLITWISE__API_KEY=...: kept out of the Nix store, which anyone
+  # on the machine can read.
   environmentFile = "/etc/secrets/assistant-bot.env";
   # Only for the AI through the Claude Code CLI (unfree), with a
   # subscription's ASSISTANT_AI__OAUTH_TOKEN instead of an API key.
@@ -330,6 +331,7 @@ chat for a personal trip), and has one currency its balances are kept in.
 /spent 30 USD taxi #transport  in another currency, with a category
 /balance                       who owes whom, with a button per payment to make
 /settle 500 to Ann             log that you paid someone back
+/trip splitwise                export the trip to a Splitwise group
 /trip                          the panel: balances, entries, people, rates,
                                summary, export, end, other trips
 /export                        every entry as a CSV file
@@ -419,6 +421,36 @@ was bought, when and by whom, followed by the summary. It is given no amounts,
 and any sentence of its with a digit in it is dropped: the numbers are the
 summary's.
 
+#### Splitwise
+
+A trip can be exported to a Splitwise group, for everyone there to see, from
+`/trip splitwise` (or the panel's 🟩 Splitwise; ending a trip offers it). It
+uses the owner's Splitwise account, so only the owner and the sudo users can,
+and works on free accounts: set `ASSISTANT_SPLITWISE__API_KEY` to the API key
+of an app registered at <https://secure.splitwise.com/apps> (any name; the
+key is on the app's page).
+
+1. **Link a group**: one of the account's groups, or a new one named after
+   the trip.
+2. **Match people**: everyone with expenses must be someone in the group.
+   The bot guesses by name (✅ Use the guesses); anyone else is picked from
+   the group's members, or invited by email. A Telegram user is matched once
+   for every trip; the trip's creator or the owner matches people.
+3. **Export** (the trip's creator): every entry becomes one Splitwise
+   expense, with the trip's exact shares and its category, the receipt's
+   items in its notes; settlements become payments. In the trip's currency
+   (each expense at the rate it was logged with: Splitwise's balances then
+   match the trip's), or in each expense's own, which Splitwise keeps apart
+   on free accounts.
+
+Exporting again sends only what changed: new entries are added, edited ones
+updated, deleted ones deleted. The bot only ever touches the expenses it
+added, never the others in the group; one changed or deleted on Splitwise is
+put back as the trip has it, and the export says which. Free accounts may only
+add so many expenses a day: an export that hits the limit stops, keeps what it
+did, and carries on when run again. Moving a trip to another group offers to
+delete its expenses from the old one.
+
 ## AI
 
 Modules can read what people write with a language model, Claude, in one of
@@ -464,15 +496,17 @@ src/
 │                             (from botconf-telegram)
 ├── directory.rs              names for user and chat ids, for the panel
 ├── access.rs                 who may use which module
-├── ai/                       language models for features: the Claude Code CLI
-│                             with the owner's subscription
+├── ai/                       language models for features: the Claude API, or
+│                             the Claude Code CLI with the owner's subscription
+├── splitwise/                the Splitwise API, where trips are exported
 ├── bot/                      Telegram client, handler tree, error reporting,
 │                             command menus
 ├── modules/                  Module trait, registry, built-in modules
 │   ├── general.rs            /start, /help, /id
 │   ├── lights/               /light: Tuya bulbs over the LAN, schedules
 │   ├── trips/                /trip, /spent: shared trip expenses; pure money
-│   │                         logic (money, ledger, draft), service, telegram/
+│   │                         logic (money, ledger, draft), service, telegram/,
+│   │                         splitwise/ (the export)
 │   └── settings.rs           /config: mounts the panel with the bot's hooks
 └── db/                       connection, entities, repositories
 crates/

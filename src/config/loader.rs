@@ -91,6 +91,7 @@ impl AssistantConfig {
         }
 
         self.ai.validate().map_err(ConfigError::Invalid)?;
+        self.splitwise.validate().map_err(ConfigError::Invalid)?;
 
         if let Err(error) = EnvFilter::try_new(&self.logging.filter) {
             return Err(ConfigError::Invalid(format!(

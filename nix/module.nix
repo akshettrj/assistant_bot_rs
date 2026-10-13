@@ -75,7 +75,8 @@ in
         A file of `ASSISTANT_<KEY__PATH>=value` lines, read by the service and
         by the `assistant-bot` command, for the settings that must stay out of
         the Nix store: `ASSISTANT_TELEGRAM__BOT_TOKEN`, `ASSISTANT_AI__API_KEY`
-        (or `ASSISTANT_AI__OAUTH_TOKEN` for the CLI), and
+        (or `ASSISTANT_AI__OAUTH_TOKEN` for the CLI),
+        `ASSISTANT_SPLITWISE__API_KEY`, and
         `ASSISTANT_MODULES__LIGHTS__DEVICES__<LIGHT>__LOCAL_KEY`.
       '';
     };

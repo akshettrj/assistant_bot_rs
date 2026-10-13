@@ -22,7 +22,7 @@ pub const TRIP_USAGE: &str =
      a summary, or reopen it (the trip's creator)\n/spent 2400 dinner or /ai dinner 2400 split \
      with Bob — log an expense · /balance — who owes whom · /settle — settle up · /export — a CSV \
      file\n/ask how much on food? — ask the AI about the spending · /trip story — the trip told \
-     by the AI";
+     by the AI\n/trip splitwise — export the trip to a Splitwise group";
 
 pub const SPENT_USAGE: &str = "/spent <amount> [currency] <what> [#category]\ne.g. /spent 2400 \
                                dinner, /spent 30 USD taxi #transport, /spent ₹450 snacks\nYou \
@@ -63,6 +63,8 @@ pub enum TripCommand {
     },
     /// The trip told by the AI.
     Story,
+    /// The trip's Splitwise group and export.
+    Splitwise,
 }
 
 pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
@@ -75,6 +77,7 @@ pub fn parse_trip(args: &str) -> Result<TripCommand, String> {
         "end" => Ok(TripCommand::End),
         "reopen" => Ok(TripCommand::Reopen),
         "story" => Ok(TripCommand::Story),
+        "splitwise" => Ok(TripCommand::Splitwise),
         "new" => {
             let mut words: Vec<&str> = rest.split_whitespace().collect();
             let currency = match words.as_slice() {
@@ -612,6 +615,7 @@ mod tests {
         assert!(parse_trip("rename").is_err());
         assert_eq!(parse_trip("reopen"), Ok(TripCommand::Reopen));
         assert_eq!(parse_trip("Story"), Ok(TripCommand::Story));
+        assert_eq!(parse_trip("splitwise"), Ok(TripCommand::Splitwise));
         assert_eq!(
             parse_trip("add"),
             Ok(TripCommand::Add {

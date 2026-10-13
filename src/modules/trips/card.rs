@@ -418,7 +418,7 @@ fn how(how: &How, amount: Money) -> String {
     }
 }
 
-fn working_line(trip: &TripView, line: &Line) -> String {
+pub(super) fn working_line(trip: &TripView, line: &Line) -> String {
     match line {
         Line::Item {
             label,

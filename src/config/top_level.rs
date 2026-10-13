@@ -3,7 +3,9 @@ use std::str::FromStr;
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AiConfig, DatabaseConfig, LoggingConfig, ModulesConfig, TelegramConfig};
+use crate::config::{
+    AiConfig, DatabaseConfig, LoggingConfig, ModulesConfig, SplitwiseConfig, TelegramConfig,
+};
 
 /// The complete configuration of the assistant.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -29,6 +31,10 @@ pub struct AssistantConfig {
     /// The module-specific settings.
     #[serde(default)]
     pub modules: ModulesConfig,
+
+    /// The Splitwise account trips are exported with.
+    #[serde(default)]
+    pub splitwise: SplitwiseConfig,
 
     /// All the telegram related settings.
     pub telegram: TelegramConfig,

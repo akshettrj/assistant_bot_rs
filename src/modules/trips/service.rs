@@ -51,6 +51,12 @@ pub enum TripsError {
     Invalid(String),
     #[error("the draft isn't ready yet")]
     Problems(Vec<Problem>),
+    #[error("link the trip to a Splitwise group first")]
+    NotLinked,
+    #[error("match {0} with someone on Splitwise first")]
+    Unmapped(String),
+    #[error(transparent)]
+    Splitwise(#[from] crate::splitwise::SplitwiseError),
     #[error("the stored data is invalid: {0}")]
     Corrupt(String),
     #[error(transparent)]
@@ -369,7 +375,7 @@ pub async fn remove_nickname(
     Ok(trips::set_nicknames(db, id, &nicknames).await?)
 }
 
-fn require_creator(trip: &TripView, user: UserId) -> Result<()> {
+pub(super) fn require_creator(trip: &TripView, user: UserId) -> Result<()> {
     if trip.trip.created_by == user {
         Ok(())
     } else {

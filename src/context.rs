@@ -8,6 +8,7 @@ use crate::{
     modules::ModuleRegistry,
     prompts::Prompts,
     settings::SettingsStore,
+    splitwise::Accounts,
 };
 
 /// The shared state every handler can request (as `Arc<AppContext>`).
@@ -24,6 +25,15 @@ pub struct AppContext {
     /// The language model, when `[ai]` configures one. Check
     /// [`ai::may_use`] before using it for someone.
     pub ai: Option<Arc<dyn Llm>>,
+    /// The Splitwise accounts `[splitwise]` configures.
+    pub splitwise: Accounts,
+}
+
+/// The outside services the bot uses.
+#[derive(Debug, Default)]
+pub struct Services {
+    pub ai: Option<Arc<dyn Llm>>,
+    pub splitwise: Accounts,
 }
 
 impl AppContext {
@@ -32,16 +42,21 @@ impl AppContext {
         db: DatabaseConnection,
         modules: Arc<ModuleRegistry>,
     ) -> Arc<Self> {
-        let ai = ai::from_config(&settings.current().config.ai);
-        Self::with_ai(settings, db, modules, ai)
+        let snapshot = settings.current();
+        let config = &snapshot.config;
+        let services = Services {
+            ai: ai::from_config(&config.ai),
+            splitwise: Accounts::from_config(&config.splitwise),
+        };
+        Self::with_services(settings, db, modules, services)
     }
 
-    /// With the language model `ai` rather than the configured one.
-    pub fn with_ai(
+    /// With `services` rather than the configured ones.
+    pub fn with_services(
         settings: SettingsStore,
         db: DatabaseConnection,
         modules: Arc<ModuleRegistry>,
-        ai: Option<Arc<dyn Llm>>,
+        services: Services,
     ) -> Arc<Self> {
         Arc::new(Self {
             settings: Arc::new(settings),
@@ -49,7 +64,8 @@ impl AppContext {
             modules,
             prompts: Arc::default(),
             directory: Directory::default(),
-            ai,
+            ai: services.ai,
+            splitwise: services.splitwise,
         })
     }
 }

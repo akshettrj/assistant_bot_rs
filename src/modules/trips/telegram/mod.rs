@@ -6,6 +6,7 @@ pub mod messages;
 pub mod panel;
 pub mod people;
 pub mod questions;
+pub mod splitwise;
 pub mod story;
 
 use std::sync::Arc;
@@ -111,6 +112,8 @@ pub async fn edit(
 pub struct Toast {
     text: String,
     alert: bool,
+    /// Already answered, e.g. before a long task.
+    answered: bool,
 }
 
 impl Toast {
@@ -118,6 +121,7 @@ impl Toast {
         Self {
             text: text.into(),
             alert: false,
+            answered: false,
         }
     }
 
@@ -125,11 +129,20 @@ impl Toast {
         Self {
             text: text.into(),
             alert: true,
+            answered: false,
         }
     }
 
     pub fn none() -> Self {
         Self::new("")
+    }
+
+    /// The press was answered already.
+    pub fn answered() -> Self {
+        Self {
+            answered: true,
+            ..Self::none()
+        }
     }
 }
 
@@ -187,6 +200,9 @@ pub async fn handle_button(
             Err(error) => return Err(error),
         },
     };
+    if toast.answered {
+        return Ok(());
+    }
     bot.answer_callback_query(query.id.clone())
         .text(truncate(&toast.text))
         .show_alert(toast.alert)

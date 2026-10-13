@@ -7,6 +7,7 @@
 pub mod chats;
 pub mod drafts;
 pub mod entries;
+pub mod splitwise;
 pub mod trips;
 pub mod users;
 

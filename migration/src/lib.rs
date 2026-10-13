@@ -12,6 +12,7 @@ mod m20260927_000001_create_chats_info;
 mod m20260927_000002_create_trips;
 mod m20260928_000001_add_entry_claims;
 mod m20260928_000002_add_member_nicknames;
+mod m20261013_000001_create_splitwise;
 
 pub struct Migrator;
 
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000002_create_trips::Migration),
             Box::new(m20260928_000001_add_entry_claims::Migration),
             Box::new(m20260928_000002_add_member_nicknames::Migration),
+            Box::new(m20261013_000001_create_splitwise::Migration),
         ]
     }
 }

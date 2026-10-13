@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use teloxide::{
     prelude::*,
-    types::{InputFile, MessageId, ParseMode, ReplyParameters, User},
+    types::{InlineKeyboardMarkup, InputFile, MessageId, ParseMode, ReplyParameters, User},
     utils::html::{bold, escape},
 };
 
@@ -23,6 +23,10 @@ use crate::{
             panel::{self as pages, Action, Field, Page, Rendered},
             report,
             service::{self, TripView, TripsError},
+            splitwise::{
+                panel::{SwAction, SwPage},
+                service as sw,
+            },
         },
     },
     prompts::{self, Answer},
@@ -113,6 +117,12 @@ pub async fn trip(
             .await
             .map(|text| escape(&text)),
         TripCommand::Story => return super::story::tell(bot, ctx, msg, user).await,
+        TripCommand::Splitwise => match service::require_active(db, chat).await {
+            Ok(trip) => {
+                return send_page(bot, ctx, msg, &trip, Page::Splitwise(SwPage::Home)).await;
+            }
+            Err(error) => Err(error),
+        },
         TripCommand::Rename { name } => {
             async {
                 let trip = service::require_active(db, chat).await?;
@@ -167,6 +177,15 @@ async fn end(
         summary(ctx, &ended).await?
     );
     reply(bot, msg, text).await?;
+    if super::splitwise::account(ctx, user).is_some() {
+        let splitwise = Action::Show(Page::Splitwise(SwPage::Home));
+        let keyboard = pages::rows(
+            vec![pages::button(ended.trip.id, "🟩 Splitwise", &splitwise)],
+            1,
+        );
+        let offer = escape("📤 Export it to Splitwise, for everyone there to see?");
+        reply_with(bot, msg, offer, Some(InlineKeyboardMarkup::new(keyboard))).await?;
+    }
     Ok(ended)
 }
 
@@ -260,6 +279,7 @@ async fn render(
         ),
         Page::Summary => pages::summary(trip, summary(ctx, trip).await?),
         Page::ConfirmEnd => pages::confirm_end(trip),
+        Page::Splitwise(page) => super::splitwise::render(ctx, trip, page, user).await?,
     })
 }
 
@@ -437,6 +457,13 @@ pub async fn press(
             export(bot, ctx, &trip, chat.id).await?;
             return Ok(Toast::none());
         }
+        Action::Splitwise(SwAction::Export) => {
+            super::splitwise::export(bot, ctx, state, query, message, &trip).await?;
+            let home = Page::Splitwise(SwPage::Home);
+            show(bot, ctx, message, &trip, home, user).await?;
+            return Ok(Toast::answered());
+        }
+        Action::Splitwise(action) => super::splitwise::press(ctx, &trip, action, user).await?,
     };
     show(bot, ctx, message, &trip, page, user).await?;
     Ok(toast)
@@ -534,6 +561,19 @@ pub async fn handle_input(
                 }
                 Err(problem) => return Ok(Err(problem)),
             },
+            Field::Email(member) => {
+                let Some(account) = super::splitwise::account(&ctx, user) else {
+                    return Ok(Err(
+                        "only the bot's owner and sudo users can use Splitwise".into()
+                    ));
+                };
+                let actor = super::splitwise::actor(&ctx, user);
+                match sw::invite(&ctx.db, account.as_ref(), &trip, actor, member, text).await {
+                    Ok(_) => Page::Splitwise(SwPage::People),
+                    Err(TripsError::Invalid(problem)) => return Ok(Err(problem)),
+                    Err(error) => return Err(error),
+                }
+            }
         };
         Ok::<_, TripsError>(Ok((trip, page)))
     }

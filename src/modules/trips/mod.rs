@@ -27,11 +27,16 @@ pub mod rates;
 pub mod report;
 pub mod service;
 pub mod settings;
+pub mod splitwise;
 pub mod story;
 mod telegram;
 pub mod text;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::Utc;
 use futures::future::BoxFuture;
@@ -80,6 +85,8 @@ enum Command {
 #[derive(Debug)]
 pub struct TripsState {
     pub rates: Rates,
+    /// The trips being exported to Splitwise: one export at a time.
+    pub exporting: Mutex<BTreeSet<i32>>,
 }
 
 pub struct TripsModule {
@@ -97,6 +104,7 @@ impl TripsModule {
         Self {
             state: Arc::new(TripsState {
                 rates: Rates::new(source),
+                exporting: Mutex::default(),
             }),
         }
     }

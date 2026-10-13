@@ -161,3 +161,11 @@ users = []
 # Seconds before a request gives up, and at most this many at once.
 timeout_secs = 60
 max_concurrent = 2
+
+[splitwise]
+# The API key of an app registered at https://secure.splitwise.com/apps, to
+# export trips to Splitwise as your account (free accounts work). Prefer the
+# environment: ASSISTANT_SPLITWISE__API_KEY=...
+# api_key = ""
+# Seconds before a request gives up.
+timeout_secs = 30
