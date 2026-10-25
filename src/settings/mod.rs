@@ -13,6 +13,7 @@ use botconf::{
     storage::SeaOrmStorage,
 };
 pub use botconf::{SettingsError, Source, command, keys, kind, parse_value};
+use botconf_telegram::domains;
 use figment::Figment;
 use sea_orm::DatabaseConnection;
 use teloxide::types::UserId;
@@ -136,8 +137,8 @@ impl SnapshotExt for Snapshot {
 }
 
 /// Who made a change, as stored.
-pub fn actor(user: Option<UserId>) -> Option<i64> {
-    user.and_then(|user| i64::try_from(user.0).ok())
+pub fn actor(user: Option<UserId>) -> Option<String> {
+    user.map(|user| user.0.to_string())
 }
 
 const LOG_FILTERS: &[FixedChoice] = &[
@@ -165,17 +166,26 @@ pub const CORE_SETTINGS: &[RuntimeSetting] = &[
     .kind(Kind::Text { optional: true }),
     RuntimeSetting::new("telegram.sudo_users_id", "Users who can use every module")
         .titled("Sudo users")
-        .kind(Kind::Users),
+        .kind(Kind::Ref {
+            domain: domains::USER,
+            many: true,
+        }),
     RuntimeSetting::per_entry(
         "telegram.allowed_users",
         "Users allowed to use a module, per module id",
-        &Kind::Users,
+        &Kind::Ref {
+            domain: domains::USER,
+            many: true,
+        },
     )
     .entry_names(Choices::Dynamic(DynamicChoices(all_modules))),
     RuntimeSetting::per_entry(
         "telegram.allowed_chats",
         "Chats whose members may use a module, per module id",
-        &Kind::Chats,
+        &Kind::Ref {
+            domain: domains::CHAT,
+            many: true,
+        },
     )
     .entry_names(Choices::Dynamic(DynamicChoices(all_modules))),
     RuntimeSetting::new(
@@ -183,7 +193,10 @@ pub const CORE_SETTINGS: &[RuntimeSetting] = &[
         "Chat where handler errors are reported",
     )
     .titled("Error reports chat")
-    .kind(Kind::Chat),
+    .kind(Kind::Ref {
+        domain: domains::CHAT,
+        many: false,
+    }),
     RuntimeSetting::new(
         "logging.filter",
         "Log filter directives, e.g. info,assistant_bot_rs=debug",
@@ -210,7 +223,10 @@ pub const CORE_SETTINGS: &[RuntimeSetting] = &[
          subscription)",
     )
     .titled("AI users")
-    .kind(Kind::Users),
+    .kind(Kind::Ref {
+        domain: domains::USER,
+        many: true,
+    }),
 ];
 
 const AI_MODELS: &[FixedChoice] = &[
@@ -312,7 +328,7 @@ mod tests {
         let store = store_with(db.clone()).await;
 
         let change = store
-            .set("telegram.sudo_users_id", json!([5, 6]), Some(1))
+            .set("telegram.sudo_users_id", json!([5, 6]), Some("1".into()))
             .await
             .unwrap();
         assert!(!change.previous.access().is_sudo(UserId(5)));

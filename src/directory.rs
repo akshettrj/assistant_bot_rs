@@ -12,9 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use botconf_telegram::Names;
+use botconf_telegram::{Names, domains};
 use futures::future::BoxFuture;
 use sea_orm::{DatabaseConnection, DbErr};
+use serde_json::Value;
 use teloxide::{
     prelude::*,
     types::{Chat, ChatFullInfo, ChatId, ChatShared, SharedUser, User, UserId},
@@ -240,20 +241,36 @@ fn logged<T: Default>(result: Result<T, DbErr>) -> T {
 }
 
 impl Names<AssistantBot> for DirectoryNames {
-    fn user<'a>(&'a self, bot: &'a AssistantBot, id: UserId) -> BoxFuture<'a, Option<Name>> {
+    fn name<'a>(
+        &'a self,
+        bot: &'a AssistantBot,
+        domain: &'a str,
+        id: &'a Value,
+    ) -> BoxFuture<'a, Option<Name>> {
         let ctx = &self.ctx;
-        Box::pin(async move { logged(ctx.directory.user(&ctx.db, Some(bot), id).await) })
-    }
-
-    fn chat<'a>(&'a self, bot: &'a AssistantBot, id: ChatId) -> BoxFuture<'a, Option<Name>> {
-        let ctx = &self.ctx;
-        Box::pin(async move { logged(ctx.directory.chat(&ctx.db, Some(bot), id).await) })
-    }
-
-    fn user_by_username<'a>(&'a self, username: &'a str) -> BoxFuture<'a, Option<UserId>> {
         Box::pin(async move {
-            let user = logged(users::find_by_username(&self.ctx.db, username).await)?;
-            u64::try_from(user.id).ok().map(UserId)
+            match domain {
+                domains::USER => {
+                    let id = UserId(id.as_u64()?);
+                    logged(ctx.directory.user(&ctx.db, Some(bot), id).await)
+                }
+                domains::CHAT => {
+                    let id = ChatId(id.as_i64()?);
+                    logged(ctx.directory.chat(&ctx.db, Some(bot), id).await)
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// `@username`s of the users the bot has seen.
+    fn resolve<'a>(&'a self, domain: &'a str, text: &'a str) -> BoxFuture<'a, Option<Value>> {
+        Box::pin(async move {
+            if domain != domains::USER {
+                return None;
+            }
+            let user = logged(users::find_by_username(&self.ctx.db, text).await)?;
+            u64::try_from(user.id).ok().map(Value::from)
         })
     }
 
@@ -292,8 +309,13 @@ mod tests {
             photo: None,
         };
         names.remember_users(std::slice::from_ref(&picked)).await;
-        assert_eq!(names.user_by_username("@ann").await, Some(UserId(7)));
-        assert_eq!(names.user_by_username("@bob").await, None);
+        assert_eq!(
+            names.resolve(domains::USER, "@ann").await,
+            Some(Value::from(7))
+        );
+        assert_eq!(names.resolve(domains::USER, "@bob").await, None);
+        // Only users have usernames.
+        assert_eq!(names.resolve(domains::CHAT, "@ann").await, None);
     }
 
     #[tokio::test]

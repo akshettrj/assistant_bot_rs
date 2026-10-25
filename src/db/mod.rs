@@ -77,4 +77,49 @@ mod tests {
                 .is_empty()
         );
     }
+
+    /// Actors stored as numbers, before `updated_by` became text, read back as
+    /// strings, and the column now keeps what is written.
+    #[tokio::test]
+    async fn settings_actors_become_text() {
+        use botconf::{Storage, storage::SeaOrmStorage};
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let config = DatabaseConfig {
+            url: "sqlite::memory:".to_string().into(),
+            max_connections: Some(1),
+            min_connections: Some(1),
+            ..DatabaseConfig::default()
+        };
+        let db = connect(&config).await.unwrap();
+        let before = Migrator::migrations().len() - 1;
+        Migrator::up(&db, Some(u32::try_from(before).unwrap()))
+            .await
+            .unwrap();
+        db.execute_unprepared(
+            "INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('logging.filter', \
+             '\"debug\"', 42, '2026-10-25 00:00:00+00:00')",
+        )
+        .await
+        .unwrap();
+
+        migrate(&db).await.unwrap();
+
+        let stored = SeaOrmStorage::new(db.clone()).load().await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].value, "\"debug\"");
+        assert_eq!(stored[0].by.as_deref(), Some("42"));
+
+        let typeof_actor = db
+            .query_one_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT typeof(updated_by) AS kind FROM settings",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "kind")
+            .unwrap();
+        assert_eq!(typeof_actor, "text");
+    }
 }
