@@ -509,17 +509,14 @@ src/
 │   │                         splitwise/ (the export)
 │   └── settings.rs           /config: mounts the panel with the bot's hooks
 └── db/                       connection, entities, repositories
-crates/
-├── botconf/                  reusable runtime settings: layering, schema,
-│                             kinds, sections, storage (SeaORM), CLI
-└── botconf-telegram/         reusable Telegram settings panel and prompts;
-                              examples/panel_bot.rs is a minimal bot using it
 migration/                    SeaORM migrations (workspace member)
 nix/build.nix                 crane build and checks
 ```
 
-The settings machinery is split into two crates that don't depend on this
-bot, so that other bots can reuse it:
+The settings machinery is two crates that don't depend on this bot, so that
+other bots can reuse it. They live in their own repository,
+[github.com/propheci/botconf](https://github.com/propheci/botconf), and this
+bot depends on them through git, pinned to a tag (see `Cargo.toml`):
 
 - **`botconf`** keeps typed settings editable at runtime. A program describes
   its configuration with a `Schema`: the typed config, what's derived from it
@@ -535,8 +532,9 @@ bot, so that other bots can reuse it:
   rest of the bot.
 
 Their API docs (`cargo doc -p botconf -p botconf-telegram --open`) have the
-details, and `cargo run -p botconf-telegram --example panel_bot` runs the
-example bot (with `TELOXIDE_TOKEN` and `EXAMPLE_OWNER_ID` set).
+details. The botconf repository also has a minimal example bot
+(`cargo run -p botconf-telegram --example panel_bot` there, with
+`TELOXIDE_TOKEN` and `EXAMPLE_OWNER_ID` set).
 
 When an update arrives:
 

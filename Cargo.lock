@@ -540,6 +540,7 @@ dependencies = [
 [[package]]
 name = "botconf"
 version = "0.1.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.1.0#9327f0e88458fd6655a9c41f2f222447434a7e17"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -557,16 +558,14 @@ dependencies = [
 [[package]]
 name = "botconf-telegram"
 version = "0.1.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.1.0#9327f0e88458fd6655a9c41f2f222447434a7e17"
 dependencies = [
  "anyhow",
  "botconf",
- "figment",
  "futures",
- "serde",
  "serde_json",
  "teloxide",
  "thiserror",
- "tokio",
  "tracing",
 ]
 

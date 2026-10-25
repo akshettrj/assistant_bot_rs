@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/*", "migration"]
+members = [".", "migration"]
 resolver = "3"
 
 [workspace.package]
@@ -53,8 +53,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-botconf = { path = "crates/botconf", features = ["cli", "sea-orm"] }
-botconf-telegram = { path = "crates/botconf-telegram" }
+botconf = { git = "https://github.com/propheci/botconf", tag = "v0.1.0", features = [
+  "cli",
+  "sea-orm",
+] }
+botconf-telegram = { git = "https://github.com/propheci/botconf", tag = "v0.1.0" }
 migration = { path = "migration" }
 
 anyhow = { workspace = true }
