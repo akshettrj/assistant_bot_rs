@@ -31,15 +31,15 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
         "The light used when a command names none (optional with a single light)",
     )
     .titled("Default light")
-    .kind(Kind::OneOf {
-        choices: Choices::KeysOf("modules.lights.devices"),
-        custom: false,
-        optional: true,
-    }),
+    .kind(Kind::one_of(
+        Choices::keys_of("modules.lights.devices"),
+        false,
+        true,
+    )),
     RuntimeSetting::per_entry(
         "presets",
         "Named looks: a brightness, and a white, a colour or a scene",
-        &Kind::Form(&PRESET_FORM),
+        PRESET,
     ),
     RuntimeSetting::per_entry(
         "scenes",
@@ -53,57 +53,41 @@ pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
     ),
 ];
 
-/// How a [`Preset`] is edited from the settings panel.
-const PRESET_FORM: Form = Form {
-    fields: &[
-        Field::new(
-            "brightness",
-            "Brightness",
-            Kind::Number {
-                min: 1,
-                max: 100,
-                unit: "%",
-                suggestions: &[5, 10, 25, 50, 75, 100],
-                optional: true,
-            },
-        ),
-        Field::new(
-            "temperature",
-            "White",
-            Kind::OneOf {
-                choices: Choices::Fixed(&[
-                    FixedChoice::new("warm", "🌅 warm"),
-                    FixedChoice::new("neutral", "⚪ neutral"),
-                    FixedChoice::new("cool", "❄️ cool"),
-                ]),
-                custom: true,
-                optional: true,
-            },
-        )
-        .group(LOOK),
-        Field::new(
-            "color",
-            "Colour",
-            Kind::OneOf {
-                choices: Choices::Dynamic(DynamicChoices(color_choices)),
-                custom: true,
-                optional: true,
-            },
-        )
-        .group(LOOK),
-        Field::new(
-            "scene",
-            "Scene",
-            Kind::OneOf {
-                choices: Choices::Dynamic(DynamicChoices(scene_choices)),
-                custom: false,
-                optional: true,
-            },
-        )
-        .group(LOOK),
-    ],
-    initial: r#"{"brightness": 100}"#,
-};
+/// How a [`Preset`] is edited from the settings panel. A nested reference to
+/// a descriptor is not promoted to `'static`, so the fields, the form and its
+/// kind each get their own `const`.
+const PRESET: &Kind = &Kind::form(PRESET_FORM);
+const PRESET_FORM: &Form = &Form::new(PRESET_FIELDS, r#"{"brightness": 100}"#);
+const WHITES: &[FixedChoice] = &[
+    FixedChoice::new("warm", "🌅 warm"),
+    FixedChoice::new("neutral", "⚪ neutral"),
+    FixedChoice::new("cool", "❄️ cool"),
+];
+const PRESET_FIELDS: &[Field] = &[
+    Field::new(
+        "brightness",
+        "Brightness",
+        Kind::number(1, 100, "%", &[5, 10, 25, 50, 75, 100], true),
+    ),
+    Field::new(
+        "temperature",
+        "White",
+        Kind::one_of(Choices::fixed(WHITES), true, true),
+    )
+    .group(LOOK),
+    Field::new(
+        "color",
+        "Colour",
+        Kind::one_of(Choices::Dynamic(DynamicChoices(color_choices)), true, true),
+    )
+    .group(LOOK),
+    Field::new(
+        "scene",
+        "Scene",
+        Kind::one_of(Choices::Dynamic(DynamicChoices(scene_choices)), false, true),
+    )
+    .group(LOOK),
+];
 
 /// A preset sets one of a white, a colour or a scene.
 const LOOK: &str = "look";
@@ -452,23 +436,19 @@ mod form_tests {
             format!("{BASE_CONFIG}\n[modules.lights.scenes.party]\nsteps = [\"red\", \"blue\"]\n");
         let ctx = context(&config, builtin()).await;
         let snapshot = ctx.settings.current();
-        let presets = ctx
-            .settings
-            .catalog()
-            .resolve("modules.lights.presets")
-            .unwrap();
-        let botconf::Kind::Map {
-            value: botconf::Kind::Form(form),
-            ..
-        } = presets.kind
-        else {
+        let catalog = ctx.settings.catalog();
+        let presets = catalog.resolve("modules.lights.presets").unwrap();
+        let botconf::Kind::Map { value, .. } = &presets.kind else {
             panic!("{:?}", presets.kind)
+        };
+        let botconf::Kind::Form(form) = &**value else {
+            panic!("{value:?}")
         };
 
         let scene = form
             .fields
             .iter()
-            .find(|field| field.key == "scene")
+            .find(|field| &*field.key == "scene")
             .unwrap();
         let scenes: Vec<_> = scene
             .kind
@@ -481,10 +461,6 @@ mod form_tests {
 
         // The form's initial value is a valid preset, and the store checks
         // the rest (e.g. a colour and a scene at once).
-        let initial = presets.kind;
-        let botconf::Kind::Map { value, .. } = initial else {
-            unreachable!()
-        };
         ctx.settings
             .set(
                 "modules.lights.presets.new",

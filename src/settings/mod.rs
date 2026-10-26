@@ -148,6 +148,11 @@ const LOG_FILTERS: &[FixedChoice] = &[
     FixedChoice::new("warn", "warn"),
 ];
 
+// The values of the per-module allow lists. A nested reference to a kind is
+// not promoted to `'static`, so each gets its own `const`.
+const USERS: &Kind = &Kind::reference(domains::USER, true);
+const CHATS: &Kind = &Kind::reference(domains::CHAT, true);
+
 /// The core keys that can change at runtime; modules declare theirs with
 /// [`ModuleSettings`]. Everything else (the bot token, the database, the
 /// owner, ...) is needed to start the bot, or is too sensitive to change
@@ -155,37 +160,28 @@ const LOG_FILTERS: &[FixedChoice] = &[
 pub const CORE_SETTINGS: &[RuntimeSetting] = &[
     RuntimeSetting::new("modules.disabled", "The modules that are turned off")
         .titled("Modules")
-        .kind(Kind::SetOf {
-            choices: Choices::Dynamic(DynamicChoices(toggleable_modules)),
-            inverted: true,
-        }),
+        .kind(Kind::set_of(
+            Choices::Dynamic(DynamicChoices(toggleable_modules)),
+            true,
+        )),
     RuntimeSetting::new(
         "timezone",
         "IANA timezone for schedules, e.g. Asia/Kolkata (default: the system's)",
     )
-    .kind(Kind::Text { optional: true }),
+    .kind(Kind::text(true)),
     RuntimeSetting::new("telegram.sudo_users_id", "Users who can use every module")
         .titled("Sudo users")
-        .kind(Kind::Ref {
-            domain: domains::USER,
-            many: true,
-        }),
+        .kind(Kind::reference(domains::USER, true)),
     RuntimeSetting::per_entry(
         "telegram.allowed_users",
         "Users allowed to use a module, per module id",
-        &Kind::Ref {
-            domain: domains::USER,
-            many: true,
-        },
+        USERS,
     )
     .entry_names(Choices::Dynamic(DynamicChoices(all_modules))),
     RuntimeSetting::per_entry(
         "telegram.allowed_chats",
         "Chats whose members may use a module, per module id",
-        &Kind::Ref {
-            domain: domains::CHAT,
-            many: true,
-        },
+        CHATS,
     )
     .entry_names(Choices::Dynamic(DynamicChoices(all_modules))),
     RuntimeSetting::new(
@@ -193,40 +189,26 @@ pub const CORE_SETTINGS: &[RuntimeSetting] = &[
         "Chat where handler errors are reported",
     )
     .titled("Error reports chat")
-    .kind(Kind::Ref {
-        domain: domains::CHAT,
-        many: false,
-    }),
+    .kind(Kind::reference(domains::CHAT, false)),
     RuntimeSetting::new(
         "logging.filter",
         "Log filter directives, e.g. info,assistant_bot_rs=debug",
     )
     .titled("Logging")
-    .kind(Kind::OneOf {
-        choices: Choices::Fixed(LOG_FILTERS),
-        custom: true,
-        optional: false,
-    }),
+    .kind(Kind::one_of(Choices::fixed(LOG_FILTERS), true, false)),
     RuntimeSetting::new(
         "ai.model",
         "The Claude model reading messages: sonnet, haiku (cheaper), opus, or a full name",
     )
     .titled("AI model")
-    .kind(Kind::OneOf {
-        choices: Choices::Fixed(AI_MODELS),
-        custom: true,
-        optional: false,
-    }),
+    .kind(Kind::one_of(Choices::fixed(AI_MODELS), true, false)),
     RuntimeSetting::new(
         "ai.users",
         "Who may use the AI besides the owner and the sudo users (it uses the owner's \
          subscription)",
     )
     .titled("AI users")
-    .kind(Kind::Ref {
-        domain: domains::USER,
-        many: true,
-    }),
+    .kind(Kind::reference(domains::USER, true)),
 ];
 
 const AI_MODELS: &[FixedChoice] = &[

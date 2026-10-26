@@ -349,10 +349,10 @@ fn check_settings_declaration(module: &RegisteredModule) -> Result<(), RegistryE
     let mut seen = HashSet::new();
     for setting in settings.runtime {
         let pointer = format!("/{}", setting.key.replace('.', "/"));
-        if defaults.json().pointer(&pointer).is_none() || !seen.insert(setting.key) {
+        if defaults.json().pointer(&pointer).is_none() || !seen.insert(&*setting.key) {
             return Err(RegistryError::UnknownRuntimeKey {
                 module: id,
-                key: setting.key,
+                key: &setting.key,
             });
         }
     }

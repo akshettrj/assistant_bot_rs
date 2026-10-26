@@ -36,7 +36,7 @@ const RUNTIME_SETTINGS: &[RuntimeSetting] = &[RuntimeSetting::new(
     "Custom /start greeting; {name} is replaced with the user's first name",
 )
 .titled("Start message")
-.kind(Kind::Text { optional: true })];
+.kind(Kind::text(true))];
 
 #[derive(BotCommands, Clone, Debug, PartialEq, Eq)]
 #[command(rename_rule = "lowercase")]

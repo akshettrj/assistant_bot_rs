@@ -48,44 +48,40 @@ const YES_OR_NO: &[FixedChoice] = &[
     FixedChoice::new("false", "❌ No"),
 ];
 
+/// A category's label. A nested reference to a kind is not promoted to
+/// `'static`, so it gets its own `const`.
+const CATEGORY: &Kind = &Kind::text(false);
+
 pub const RUNTIME_SETTINGS: &[RuntimeSetting] = &[
     RuntimeSetting::new(
         "default_currency",
         "The currency of new trips when none is given, e.g. INR",
     )
     .titled("Default currency")
-    .kind(Kind::Text { optional: true }),
+    .kind(Kind::text(true)),
     RuntimeSetting::new(
         "notify_home_chat",
         "Whether expenses logged in private are announced in the trip's chat",
     )
     .titled("Announce private expenses")
-    .kind(Kind::OneOf {
-        choices: Choices::Fixed(YES_OR_NO),
-        custom: false,
-        optional: false,
-    }),
+    .kind(Kind::one_of(Choices::fixed(YES_OR_NO), false, false)),
     RuntimeSetting::new(
         "auto_rates",
         "Whether foreign expenses use the day's ECB rate when the trip has no fixed rate",
     )
     .titled("Automatic exchange rates")
-    .kind(Kind::OneOf {
-        choices: Choices::Fixed(YES_OR_NO),
-        custom: false,
-        optional: false,
-    }),
+    .kind(Kind::one_of(Choices::fixed(YES_OR_NO), false, false)),
     RuntimeSetting::new(
         "ai_keyword",
         "A word that makes a message be read by the AI like /ai, e.g. log for \"log dinner 2400\" \
          (in groups, the bot only sees it with privacy mode off)",
     )
     .titled("AI keyword")
-    .kind(Kind::Text { optional: true }),
+    .kind(Kind::text(true)),
     RuntimeSetting::per_entry(
         "categories",
         "Extra expense categories: an id, and a label with an emoji (e.g. 🛂 Visa)",
-        &Kind::Text { optional: false },
+        CATEGORY,
     ),
 ];
 
