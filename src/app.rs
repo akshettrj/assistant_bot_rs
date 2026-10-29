@@ -19,6 +19,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let load_error = || format!("failed to load `{}`", cli.config.display());
     let base = AssistantConfig::figment(&cli.config).with_context(load_error)?;
     let config = AssistantConfig::from_figment(&base).with_context(load_error)?;
+    // The stores re-read the file and the environment on every reload; the
+    // startup `base` only checks that the file is valid on its own.
+    let source = {
+        let path = cli.config.clone();
+        move || AssistantConfig::figment(&path)
+    };
     let log_filter = telemetry::init(&config.logging)?;
 
     // The file must be valid on its own: the runtime settings are optional.
@@ -50,7 +56,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Settings(action) => {
             let db = connect_and_migrate(&config).await?;
             // No log filter handle: changes are for the bot, not this process.
-            let settings = settings::load(base, db, Arc::clone(&registry), None)
+            let settings = settings::load(source, db, Arc::clone(&registry), None)
                 .await
                 .context("failed to load the runtime settings")?;
 
@@ -63,7 +69,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Light { args } => {
             let db = connect_and_migrate(&config).await?;
-            let settings = settings::load(base, db.clone(), Arc::clone(&registry), None)
+            let settings = settings::load(source, db.clone(), Arc::clone(&registry), None)
                 .await
                 .context("failed to load the runtime settings")?;
             let ctx = AppContext::new(settings, db, registry);
@@ -97,7 +103,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Run => {
             let db = connect_and_migrate(&config).await?;
             let settings =
-                settings::load(base, db.clone(), Arc::clone(&registry), Some(log_filter))
+                settings::load(source, db.clone(), Arc::clone(&registry), Some(log_filter))
                     .await
                     .context("failed to load the runtime settings")?;
 

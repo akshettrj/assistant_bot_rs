@@ -14,7 +14,6 @@ use botconf::{
 };
 pub use botconf::{SettingsError, Source, command, keys, kind, parse_value};
 use botconf_telegram::domains;
-use figment::Figment;
 use sea_orm::DatabaseConnection;
 use teloxide::types::UserId;
 
@@ -95,10 +94,11 @@ impl AssistantSchema {
     }
 }
 
-/// Loads the settings: `base` (the config file and the environment), then
-/// the overrides stored in the database.
+/// Loads the settings: the base from `source` (the config file and the
+/// environment; a closure re-reads them on every reload), then the overrides
+/// stored in the database.
 pub async fn load(
-    base: Figment,
+    source: impl botconf::BaseSource,
     db: DatabaseConnection,
     modules: Arc<ModuleRegistry>,
     log_filter: Option<LogFilterHandle>,
@@ -107,7 +107,7 @@ pub async fn load(
         modules,
         log_filter,
     };
-    SettingsStore::load(schema, base, SeaOrmStorage::new(db)).await
+    SettingsStore::load(schema, source, SeaOrmStorage::new(db)).await
 }
 
 /// The assistant's shortcuts on a snapshot.
@@ -302,6 +302,26 @@ mod tests {
             store.current().source("telegram.sudo_users_id"),
             Source::Stored
         );
+    }
+
+    #[tokio::test]
+    async fn reload_picks_up_file_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, BASE_CONFIG).unwrap();
+
+        let source = {
+            let path = path.clone();
+            move || AssistantConfig::figment(&path)
+        };
+        let store = load(source, memory_db().await, registry(), None)
+            .await
+            .unwrap();
+        assert!(!store.current().access().is_sudo(UserId(9)));
+
+        std::fs::write(&path, format!("{BASE_CONFIG}sudo_users_id = [9]\n")).unwrap();
+        store.reload().await.unwrap();
+        assert!(store.current().access().is_sudo(UserId(9)));
     }
 
     #[tokio::test]

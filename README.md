@@ -139,8 +139,10 @@ assistant_bot_rs settings set telegram.sudo_users_id [1, 2]
 assistant_bot_rs settings unset modules.disabled
 ```
 
-A running bot picks up changes made from the command line (or edits to the
-config file) after `/config reload`, or on its next start.
+A running bot picks up changes made from the command line, and edits to the
+config file, after `/config reload` (or on its next start). The bot token, the
+API URL, the owner and the database settings are read only at startup, so
+changing them needs a restart.
 
 | Key                             | What it controls                                  |
 | ------------------------------- | ------------------------------------------------- |
