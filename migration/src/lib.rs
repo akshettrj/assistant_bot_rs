@@ -14,6 +14,7 @@ mod m20260928_000001_add_entry_claims;
 mod m20260928_000002_add_member_nicknames;
 mod m20261013_000001_create_splitwise;
 mod m20261025_000001_settings_actor_text;
+mod m20261029_000001_create_panel_tokens;
 
 pub struct Migrator;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260928_000002_add_member_nicknames::Migration),
             Box::new(m20261013_000001_create_splitwise::Migration),
             Box::new(m20261025_000001_settings_actor_text::Migration),
+            Box::new(m20261029_000001_create_panel_tokens::Migration),
         ]
     }
 }

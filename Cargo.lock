@@ -539,8 +539,8 @@ dependencies = [
 
 [[package]]
 name = "botconf"
-version = "0.3.0"
-source = "git+https://github.com/propheci/botconf?tag=v0.3.0#040f79594492dc5aab87553013603dbf68a71e48"
+version = "0.4.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.4.0#87b1906a89bf981d3801858a7d6e0c6864d7fcff"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -556,12 +556,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "botconf-panel"
+version = "0.4.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.4.0#87b1906a89bf981d3801858a7d6e0c6864d7fcff"
+dependencies = [
+ "botconf",
+ "futures",
+ "sea-orm",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "botconf-telegram"
-version = "0.3.0"
-source = "git+https://github.com/propheci/botconf?tag=v0.3.0#040f79594492dc5aab87553013603dbf68a71e48"
+version = "0.4.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.4.0#87b1906a89bf981d3801858a7d6e0c6864d7fcff"
 dependencies = [
  "anyhow",
  "botconf",
+ "botconf-panel",
  "futures",
  "serde_json",
  "teloxide",

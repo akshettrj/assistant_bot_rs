@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use botconf_telegram::{Page, SettingsPanel};
+use botconf_telegram::{Page, SeaOrmTokenStore, SettingsPanel};
 use teloxide::{
     prelude::*,
     types::{BotCommand, InlineKeyboardButton},
@@ -54,7 +54,9 @@ pub fn panel(ctx: &Arc<AppContext>) -> Arc<Panel> {
         .section_note(|snapshot, id| (!snapshot.is_enabled(id)).then(|| "off".to_string()))
         .command("config")
         .callback_prefix(PREFIX)
-        .prompt_owner(ID);
+        .prompt_owner(ID)
+        // Buttons too long for Telegram keep working after a restart.
+        .token_store(SeaOrmTokenStore::new(ctx.db.clone()));
     Arc::new(panel)
 }
 

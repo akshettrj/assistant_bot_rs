@@ -53,11 +53,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-botconf = { git = "https://github.com/propheci/botconf", tag = "v0.3.0", features = [
+botconf = { git = "https://github.com/propheci/botconf", tag = "v0.4.0", features = [
   "cli",
   "sea-orm",
 ] }
-botconf-telegram = { git = "https://github.com/propheci/botconf", tag = "v0.3.0" }
+botconf-telegram = { git = "https://github.com/propheci/botconf", tag = "v0.4.0", features = [
+  "sea-orm",
+] }
 migration = { path = "migration" }
 
 anyhow = { workspace = true }

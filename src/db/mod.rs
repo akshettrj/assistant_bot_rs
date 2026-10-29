@@ -92,7 +92,11 @@ mod tests {
             ..DatabaseConfig::default()
         };
         let db = connect(&config).await.unwrap();
-        let before = Migrator::migrations().len() - 1;
+        // Every migration before the one that makes the column text.
+        let before = Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == "m20261025_000001_settings_actor_text")
+            .unwrap();
         Migrator::up(&db, Some(u32::try_from(before).unwrap()))
             .await
             .unwrap();
@@ -121,5 +125,22 @@ mod tests {
             .try_get::<String>("", "kind")
             .unwrap();
         assert_eq!(typeof_actor, "text");
+    }
+
+    /// The settings panel keeps the handles of long buttons in `panel_tokens`,
+    /// in the shape botconf expects.
+    #[tokio::test]
+    async fn panel_tokens_keep_button_handles() {
+        use botconf_telegram::{SeaOrmTokenStore, TokenStore};
+
+        let db = test_support::memory_db().await;
+        let store = SeaOrmTokenStore::new(db);
+        assert!(store.put("~abc", "d:3.long", 0, 100).await.unwrap());
+        assert_eq!(
+            store.get("~abc", 50).await.unwrap().as_deref(),
+            Some("d:3.long")
+        );
+        assert_eq!(store.get("~abc", 100).await.unwrap(), None);
+        assert_eq!(store.purge_expired(100).await.unwrap(), 1);
     }
 }
