@@ -539,8 +539,8 @@ dependencies = [
 
 [[package]]
 name = "botconf"
-version = "0.8.0"
-source = "git+https://github.com/propheci/botconf?tag=v0.8.0#1405074e53760c4e038ce7ed84c63a0d1e1deef8"
+version = "0.10.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.10.0#c6e72c6badac88b8849c1a76221bbac2b84f012d"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -557,8 +557,8 @@ dependencies = [
 
 [[package]]
 name = "botconf-panel"
-version = "0.8.0"
-source = "git+https://github.com/propheci/botconf?tag=v0.8.0#1405074e53760c4e038ce7ed84c63a0d1e1deef8"
+version = "0.10.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.10.0#c6e72c6badac88b8849c1a76221bbac2b84f012d"
 dependencies = [
  "botconf",
  "futures",
@@ -570,8 +570,8 @@ dependencies = [
 
 [[package]]
 name = "botconf-telegram"
-version = "0.8.0"
-source = "git+https://github.com/propheci/botconf?tag=v0.8.0#1405074e53760c4e038ce7ed84c63a0d1e1deef8"
+version = "0.10.0"
+source = "git+https://github.com/propheci/botconf?tag=v0.10.0#c6e72c6badac88b8849c1a76221bbac2b84f012d"
 dependencies = [
  "anyhow",
  "botconf",
